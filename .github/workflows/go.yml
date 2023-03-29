@@ -1,0 +1,57 @@
+name: Go
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Go build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out code into the Go module directory
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v3
+      with:
+        go-version: 1.19
+        cache: true
+
+    - name: Setup golangci-lint
+      uses: golangci/golangci-lint-action@v3.1.0
+      with:
+        version: v1.51.2
+        args: --timeout 10m -v -c .golangci.yml
+
+    - name: Test
+      run: |
+        curl -s https://raw.githubusercontent.com/thalesfsp/configurer/main/resources/install.sh | sh
+        make infra-start
+        sleep 5
+        make test coverage
+        sleep 5
+        make infra-stop
+
+    - name: Integration test
+      run: |
+        curl -s https://raw.githubusercontent.com/thalesfsp/configurer/main/resources/install.sh | sh
+        make test-integration coverage
+    
+    - name: Quality Gate - Test coverage shall be above threshold
+      env:
+          TESTCOVERAGE_THRESHOLD: 30
+      run: |
+            echo "Quality Gate: checking test coverage is above threshold ..."
+            echo "Threshold             : $TESTCOVERAGE_THRESHOLD %"
+            totalCoverage=`go tool cover -func=coverage.out | grep total | grep -Eo '[0-9]+\.[0-9]+'`
+            echo "Current test coverage : $totalCoverage %"
+            if (( $(echo "$totalCoverage $TESTCOVERAGE_THRESHOLD" | awk '{print ($1 > $2)}') )); then
+                echo "OK"
+            else
+                echo "Current test coverage is below threshold. Please add more unit tests or adjust threshold to a lower value."
+                echo "Failed"
+                exit 1
+            fi
