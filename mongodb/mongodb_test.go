@@ -72,6 +72,11 @@ func TestNew(t *testing.T) {
 
 			str, err := New(ctx, shared.DatabaseName, options.Client().ApplyURI(host))
 			assert.NoError(t, err)
+			assert.NotNil(t, str)
+
+			if str == nil || str.Client == nil {
+				t.Fatal("str or str.Client is nil")
+			}
 
 			// Ensures the test collection will be clean after the test even if
 			// it fails.

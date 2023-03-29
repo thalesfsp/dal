@@ -72,6 +72,11 @@ func TestNew(t *testing.T) {
 				Addresses: []string{host},
 			})
 			assert.NoError(t, err)
+			assert.NotNil(t, str)
+
+			if str == nil || str.Client == nil {
+				t.Fatal("str or str.Client is nil")
+			}
 
 			// Ensures that document will be deleted after the test even if it
 			// fails.

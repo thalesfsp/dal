@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/eapache/go-resiliency/retrier"
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"github.com/thalesfsp/customerror"
@@ -840,23 +842,35 @@ func NewWithDynamicIndex(
 		)
 	}
 
-	res, err := client.Info(client.Info.WithContext(ctx))
-	if err != nil {
-		return nil, customerror.NewFailedToError("ping", customerror.WithError(err))
-	}
+	r := retrier.New(retrier.ExponentialBackoff(3, 10*time.Second), nil)
 
-	if _, err := io.Copy(io.Discard, res.Body); err != nil {
-		return nil, customerror.NewFailedToError(
-			"consume the response body",
-			customerror.WithError(err),
-		)
-	}
+	if err := r.Run(func() error {
+		res, err := client.Info(client.Info.WithContext(ctx))
+		if err != nil {
+			return customerror.NewFailedToError("ping", customerror.WithError(err))
+		}
 
-	// NOTE: It is critical to both close the response body and to consume it,
-	// in order to re-use persistent TCP connections in the default HTTP
-	// transport. If you're not interested in the response body, call
-	// `io.Copy(io.Discard, res.Body).`
-	defer res.Body.Close()
+		defer res.Body.Close()
+
+		if res.IsError() {
+			return err
+		}
+
+		// NOTE: It is critical to both close the response body and to consume it,
+		// in order to re-use persistent TCP connections in the default HTTP
+		// transport. If you're not interested in the response body, call
+		// `io.Copy(io.Discard, res.Body).`
+		if _, err := io.Copy(io.Discard, res.Body); err != nil {
+			return customerror.NewFailedToError(
+				"consume the response body",
+				customerror.WithError(err),
+			)
+		}
+
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 
 	s, err := storage.New(name)
 	if err != nil {
