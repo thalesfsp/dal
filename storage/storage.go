@@ -40,13 +40,12 @@ type Storage struct {
 	Name string `json:"name" validate:"required,lowercase,gte=1"`
 
 	// Metrics.
-	counterCount      *expvar.Int `json:"-" validate:"required,gte=0"`
-	counterDelete     *expvar.Int `json:"-" validate:"required,gte=0"`
-	counterDeleteSoft *expvar.Int `json:"-" validate:"required,gte=0"`
-	counterGet        *expvar.Int `json:"-" validate:"required,gte=0"`
-	counterList       *expvar.Int `json:"-" validate:"required,gte=0"`
-	counterSet        *expvar.Int `json:"-" validate:"required,gte=0"`
-	counterUpdate     *expvar.Int `json:"-" validate:"required,gte=0"`
+	counterCount  *expvar.Int `json:"-" validate:"required,gte=0"`
+	counterDelete *expvar.Int `json:"-" validate:"required,gte=0"`
+	counterGet    *expvar.Int `json:"-" validate:"required,gte=0"`
+	counterList   *expvar.Int `json:"-" validate:"required,gte=0"`
+	counterSet    *expvar.Int `json:"-" validate:"required,gte=0"`
+	counterUpdate *expvar.Int `json:"-" validate:"required,gte=0"`
 }
 
 //////
@@ -76,11 +75,6 @@ func (s *Storage) GetCounterCount() *expvar.Int {
 // GetCounterDelete returns the counterDelete metric.
 func (s *Storage) GetCounterDelete() *expvar.Int {
 	return s.counterDelete
-}
-
-// GetCounterDeleteSoft returns the counterDeleteSoft metric.
-func (s *Storage) GetCounterDeleteSoft() *expvar.Int {
-	return s.counterDeleteSoft
 }
 
 // GetCounterGet returns the counterGet metric.
