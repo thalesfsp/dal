@@ -1,13 +1,12 @@
-package s3
+package file
 
 import (
 	"context"
-	"fmt"
 	"os"
+	"path"
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
 	"github.com/stretchr/testify/assert"
 	"github.com/thalesfsp/dal/internal/shared"
 	"github.com/thalesfsp/params/count"
@@ -26,7 +25,7 @@ var listParam = &list.List{
 	Sort: customsort.SortMap{
 		"id": customsort.Asc,
 	},
-	Search: "VF*",
+	Search: "dal-*.json",
 }
 
 func TestNew(t *testing.T) {
@@ -34,21 +33,13 @@ func TestNew(t *testing.T) {
 		t.Skip("Skipping test. Not in e2e " + shared.Integration + "environment.")
 	}
 
-	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "s3_test")
+	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "file_test")
 
-	bucket := os.Getenv("AWS_BUCKET")
-	region := os.Getenv("AWS_REGION")
+	dir := os.Getenv("FILE_DIR")
+	filename := os.Getenv("FILE_FILENAME")
 
-	if bucket == "" || region == "" {
+	if dir == "" || filename == "" {
 		t.Fatal("Need to set AWS_BUCKET and AWS_REGION environment variables")
-	}
-
-	kiD := os.Getenv("AWS_ACCESS_KEY_ID")
-	sAK := os.Getenv("AWS_SECRET_ACCESS_KEY")
-	sT := os.Getenv("AWS_SESSION_TOKEN")
-
-	if kiD == "" || sAK == "" || sT == "" {
-		t.Skip("Skipping test. Missing creds")
 	}
 
 	type args struct {
@@ -80,19 +71,15 @@ func TestNew(t *testing.T) {
 			ctx, cancel := context.WithTimeout(tt.args.ctx, shared.DefaultTimeout)
 			defer cancel()
 
-			cfg := &Config{
-				Region: aws.String(region),
-			}
-
-			str, err := New(ctx, bucket, cfg)
+			str, err := New(ctx)
 			assert.NoError(t, err)
 			assert.NotNil(t, str)
 
-			if str == nil || str.Client == nil {
+			if str == nil {
 				t.Fatal("str or str.Client is nil")
 			}
 
-			trgt := fmt.Sprintf("dal-s3-test-%s.json", tt.args.id)
+			trgt := path.Join(dir, filename)
 
 			// Ensures that document will be deleted after the test even if it
 			// fails.
@@ -145,7 +132,7 @@ func TestNew(t *testing.T) {
 			// Should be able to count doc.
 			//////
 
-			count, err := str.Count(ctx, trgt, &count.Count{
+			count, err := str.Count(ctx, dir, &count.Count{
 				Search: listParam.Search,
 			})
 
@@ -158,7 +145,7 @@ func TestNew(t *testing.T) {
 
 			var listItems ResponseListKeys
 
-			assert.NoError(t, str.List(tt.args.ctx, trgt, &listItems, listParam))
+			assert.NoError(t, str.List(tt.args.ctx, dir, &listItems, listParam))
 			assert.NotNil(t, listItems)
 			assert.NotEmpty(t, listItems.Keys)
 
@@ -166,6 +153,8 @@ func TestNew(t *testing.T) {
 			found := false
 
 			for _, item := range listItems.Keys {
+				item = path.Join(dir, item)
+
 				if item == trgt {
 					assert.Equal(t, item, trgt)
 
@@ -196,7 +185,7 @@ func TestNew(t *testing.T) {
 
 			var emptyListItems ResponseListKeys
 
-			assert.NoError(t, str.List(tt.args.ctx, trgt, &listItems, listParam))
+			assert.NoError(t, str.List(tt.args.ctx, dir, &listItems, listParam))
 			assert.NotNil(t, emptyListItems)
 			assert.Empty(t, emptyListItems.Keys)
 

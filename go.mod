@@ -51,9 +51,7 @@ require (
 	github.com/prometheus/procfs v0.9.0 // indirect
 	github.com/santhosh-tekuri/jsonschema v1.2.4 // indirect
 	github.com/saucelabs/customerror v1.0.4 // indirect
-	github.com/thalesfsp/concurrentloop v1.1.3 // indirect
 	github.com/thalesfsp/configurer v1.1.30 // indirect
-	github.com/thalesfsp/httpclient v1.0.8 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.1.2 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect

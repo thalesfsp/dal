@@ -92,6 +92,17 @@ func Decode(r io.Reader, v any) error {
 	return nil
 }
 
+// Encode process `v` into stream `w` and returns an error if any.
+func Encode(w io.Writer, v any) error {
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		return customerror.NewFailedToError("encode",
+			customerror.WithError(err),
+		)
+	}
+
+	return nil
+}
+
 // ReadAll reads all the data from `r` and returns an error if any.
 func ReadAll(r io.Reader) ([]byte, error) {
 	b, err := io.ReadAll(r)
