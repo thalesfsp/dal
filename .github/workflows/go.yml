@@ -49,7 +49,6 @@ jobs:
         env:
           SFTP_USERS: foo:pass
           SFTP_PASSWORD_AUTH: false
-        command: ["foo:pass:::upload"]
         ports:
           - "2222:22"
 
