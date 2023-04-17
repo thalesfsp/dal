@@ -35,7 +35,7 @@ func TestNew(t *testing.T) {
 		t.Skip("Skipping test. Not in e2e " + shared.Integration + "environment.")
 	}
 
-	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "mongodb_test")
+	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "dal_"+Name+"_test")
 
 	host := os.Getenv("MONGODB_HOST")
 

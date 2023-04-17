@@ -33,7 +33,7 @@ func TestNew(t *testing.T) {
 		t.Skip("Skipping test. Not in e2e " + shared.Integration + "environment.")
 	}
 
-	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "psql_test")
+	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "dal_"+Name+"_test")
 
 	host := os.Getenv("POSTGRES_HOST")
 

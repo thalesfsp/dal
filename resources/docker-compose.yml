@@ -8,6 +8,7 @@ services:
       - discovery.type=single-node
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
       - xpack.security.enabled=false
+      - ingest.geoip.downloader.enabled=false
     ulimits:
       memlock:
         soft: -1
@@ -71,7 +72,19 @@ services:
       - POSTGRES_DB=test
       - POSTGRES_HOST_AUTH_METHOD=trust
       - POSTGRES_SSLMODE=disable
+      - PGDATA=/var/lib/postgresql/data/some_name/
     ports:
       - "5432:5432"
     volumes:
       - /tmp/postgres:/var/lib/postgresql/data
+
+  sftp:
+    image: atmoz/sftp
+    container_name: sftp
+    restart: always
+    ports:
+      - "2222:22"
+    environment:
+      - SFTP_USERS=foo:pass
+      - SFTP_PASSWORD_AUTH=false
+    command: foo:pass:::upload

@@ -1,8 +1,10 @@
-package redis
+package sftp
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path"
 	"testing"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/thalesfsp/params/list"
 	"github.com/thalesfsp/params/retrieve"
 	"github.com/thalesfsp/params/update"
+	"golang.org/x/crypto/ssh"
 )
 
 var listParam = &list.List{
@@ -24,9 +27,14 @@ var listParam = &list.List{
 	Sort: customsort.SortMap{
 		"id": customsort.Asc,
 	},
-	Search: "VF*",
+	Search: "*",
 }
 
+//////
+// Tests.
+//////
+
+//nolint:gosec
 func TestNew(t *testing.T) {
 	if !shared.IsEnvironment(shared.Integration) {
 		t.Skip("Skipping test. Not in e2e " + shared.Integration + "environment.")
@@ -34,10 +42,14 @@ func TestNew(t *testing.T) {
 
 	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "dal_"+Name+"_test")
 
-	host := os.Getenv("REDIS_HOST")
+	addr := os.Getenv("STFP_ADDR")
+	user := os.Getenv("STFP_USER")
+	pwd := os.Getenv("STFP_PASSWORD")
+	trgtDir := os.Getenv("SFTP_DIR")
+	filename := os.Getenv("SFTP_FILENAME")
 
-	if host == "" {
-		t.Fatal("REDIS_HOST is not set")
+	if addr == "" || user == "" || pwd == "" {
+		t.Fatal("STFP_ADDR, STFP_USER or STFP_PASSWORD is not set")
 	}
 
 	type args struct {
@@ -69,22 +81,28 @@ func TestNew(t *testing.T) {
 			ctx, cancel := context.WithTimeout(tt.args.ctx, shared.DefaultTimeout)
 			defer cancel()
 
-			cfg := &Config{
-				Addr: host,
-			}
+			str, err := New(ctx, addr, &Config{
+				User: user,
+				Auth: []ssh.AuthMethod{
+					ssh.Password(pwd),
+				},
+				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+				Timeout:         5 * time.Second,
+			})
 
-			str, err := New(ctx, cfg)
 			assert.NoError(t, err)
 			assert.NotNil(t, str)
 
-			if str == nil || str.Client == nil {
+			if str == nil {
 				t.Fatal("str or str.Client is nil")
 			}
+
+			trgt := fmt.Sprintf("%s/%s", trgtDir, filename)
 
 			// Ensures that document will be deleted after the test even if it
 			// fails.
 			defer func() {
-				assert.NoError(t, str.Delete(ctx, tt.args.id, shared.DatabaseName, &delete.Delete{}))
+				assert.NoError(t, str.Delete(ctx, tt.args.id, trgt, &delete.Delete{}))
 			}()
 
 			//////
@@ -93,9 +111,10 @@ func TestNew(t *testing.T) {
 
 			insertedItem := shared.TestDataWithID
 
-			id, err := str.Create(ctx, tt.args.id, shared.DatabaseName, insertedItem, &create.Create{})
+			id, err := str.Create(ctx, tt.args.id, trgt, insertedItem, &create.Create{})
 			assert.NotEmpty(t, id)
 			assert.NoError(t, err)
+			assert.Nil(t, err)
 
 			// Give enough time for the data to be inserted.
 			time.Sleep(1 * time.Second)
@@ -106,7 +125,7 @@ func TestNew(t *testing.T) {
 
 			var retrievedItem shared.TestDataWithIDS
 
-			assert.NoError(t, str.Retrieve(ctx, tt.args.id, shared.DatabaseName, &retrievedItem, &retrieve.Retrieve{}))
+			assert.NoError(t, str.Retrieve(ctx, tt.args.id, trgt, &retrievedItem, &retrieve.Retrieve{}))
 			assert.Equal(t, insertedItem, &retrievedItem)
 
 			//////
@@ -114,7 +133,7 @@ func TestNew(t *testing.T) {
 			//////
 
 			updatedItem := shared.UpdatedTestDataID
-			assert.NoError(t, str.Update(ctx, tt.args.id, shared.DatabaseName, updatedItem, &update.Update{}))
+			assert.NoError(t, str.Update(ctx, tt.args.id, trgt, updatedItem, &update.Update{}))
 
 			// Give enough time for the data to be updated.
 			time.Sleep(1 * time.Second)
@@ -125,14 +144,14 @@ func TestNew(t *testing.T) {
 
 			var retrievedUpdatedItem shared.TestDataWithIDS
 
-			assert.NoError(t, str.Retrieve(ctx, tt.args.id, shared.DatabaseName, &retrievedUpdatedItem, &retrieve.Retrieve{}))
+			assert.NoError(t, str.Retrieve(ctx, tt.args.id, trgt, &retrievedUpdatedItem, &retrieve.Retrieve{}))
 			assert.Equal(t, &retrievedUpdatedItem, updatedItem)
 
 			//////
 			// Should be able to count doc.
 			//////
 
-			count, err := str.Count(ctx, shared.DatabaseName, &count.Count{
+			count, err := str.Count(ctx, trgtDir, &count.Count{
 				Search: listParam.Search,
 			})
 
@@ -145,7 +164,7 @@ func TestNew(t *testing.T) {
 
 			var listItems ResponseListKeys
 
-			assert.NoError(t, str.List(tt.args.ctx, shared.DatabaseName, &listItems, listParam))
+			assert.NoError(t, str.List(tt.args.ctx, trgtDir, &listItems, listParam))
 			assert.NotNil(t, listItems)
 			assert.NotEmpty(t, listItems.Keys)
 
@@ -153,8 +172,10 @@ func TestNew(t *testing.T) {
 			found := false
 
 			for _, item := range listItems.Keys {
-				if item == tt.args.id {
-					assert.Equal(t, retrievedUpdatedItem.ID, item)
+				item = path.Join(trgtDir, item)
+
+				if item == trgt {
+					assert.Equal(t, item, trgt)
 
 					found = true
 
@@ -172,7 +193,7 @@ func TestNew(t *testing.T) {
 			// Should be able to delete docs.
 			//////
 
-			assert.NoError(t, str.Delete(ctx, tt.args.id, shared.DatabaseName, &delete.Delete{}))
+			assert.NoError(t, str.Delete(ctx, tt.args.id, trgt, &delete.Delete{}))
 
 			// Give enough time for the data to be deleted.
 			time.Sleep(1 * time.Second)
@@ -183,7 +204,7 @@ func TestNew(t *testing.T) {
 
 			var emptyListItems ResponseListKeys
 
-			assert.NoError(t, str.List(tt.args.ctx, shared.DatabaseName, &listItems, listParam))
+			assert.NoError(t, str.List(tt.args.ctx, trgtDir, &listItems, listParam))
 			assert.NotNil(t, emptyListItems)
 			assert.Empty(t, emptyListItems.Keys)
 

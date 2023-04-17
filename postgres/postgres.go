@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 
 	// Import the postgres driver.
 	_ "github.com/doug-martin/goqu/v9/dialect/postgres"
@@ -853,7 +852,7 @@ func New(ctx context.Context, dataSource string) (*Postgres, error) {
 		)
 	}
 
-	r := retrier.New(retrier.ExponentialBackoff(3, 10*time.Second), nil)
+	r := retrier.New(retrier.ExponentialBackoff(3, shared.TimeoutPing), nil)
 
 	if err := r.Run(func() error {
 		if err := client.Ping(); err != nil {

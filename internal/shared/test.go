@@ -57,6 +57,11 @@ type TestDataWithIDS struct {
 	Version string `json:"version,omitempty" query:"version" db:"version" dbType:"varchar(255)"`
 }
 
+// ResponseTestDataWithIDS is the response from the Redis list SCAN command.
+type ResponseTestDataWithIDS struct {
+	Items []TestDataWithIDS `json:"items"`
+}
+
 var (
 	// TestData is the test data.
 	TestData = &TestDataS{

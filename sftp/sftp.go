@@ -1,13 +1,13 @@
-package mongodb
+package sftp
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
-	"strings"
+	"net/url"
+	"os"
 
-	"github.com/eapache/go-resiliency/retrier"
+	"github.com/pkg/sftp"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/internal/customapm"
 	"github.com/thalesfsp/dal/internal/logging"
@@ -15,7 +15,6 @@ import (
 	"github.com/thalesfsp/dal/storage"
 	"github.com/thalesfsp/params/count"
 	"github.com/thalesfsp/params/create"
-	"github.com/thalesfsp/params/customsort"
 	"github.com/thalesfsp/params/delete"
 	"github.com/thalesfsp/params/list"
 	"github.com/thalesfsp/params/retrieve"
@@ -25,9 +24,7 @@ import (
 	"github.com/thalesfsp/sypl/fields"
 	"github.com/thalesfsp/sypl/level"
 	"github.com/thalesfsp/validation"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"golang.org/x/crypto/ssh"
 )
 
 //////
@@ -35,26 +32,24 @@ import (
 //////
 
 // Name of the storage.
-const Name = "mongodb"
+const Name = "sftp"
 
 // Singleton.
 var singleton storage.IStorage
 
-// Config is the MongoDB configuration.
-type Config = options.ClientOptions
+type (
+	// Config is the SFTP configuration.
+	Config = ssh.ClientConfig
 
-// MongoDB storage definition.
-type MongoDB struct {
+	// Option is for the SFTP configuration.
+	Option = sftp.ClientOption
+)
+
+// SFTP storage definition.
+type SFTP struct {
 	*storage.Storage
 
-	// Client is the MongoDB client.
-	Client *mongo.Client `json:"-" validate:"required"`
-
-	// Config is the MongoDB configuration.
-	Config *Config `json:"-"`
-
-	// Database to connect to.
-	Database string `json:"database" validate:"required"`
+	Client *sftp.Client `json:"-" validate:"required"`
 
 	// Target allows to set a static target. If it is empty, the target will be
 	// dynamic - the one set at the operation (count, create, delete, etc) time.
@@ -67,37 +62,11 @@ type MongoDB struct {
 }
 
 //////
-// Helpers.
-//////
-
-// ToMongoString converts the `Sort` to MongoDB sort format.
-func ToMongoString(s customsort.Sort) (bson.D, error) {
-	sortMap, err := s.ToMap()
-	if err != nil {
-		return nil, err
-	}
-
-	sortFields := bson.D{}
-
-	for fieldName, sortOrder := range sortMap {
-		sortOrderInt := 1
-
-		if strings.ToLower(sortOrder) == customsort.Desc {
-			sortOrderInt = -1
-		}
-
-		sortFields = append(sortFields, bson.E{Key: fieldName, Value: sortOrderInt})
-	}
-
-	return sortFields, nil
-}
-
-//////
 // Implements the IStorage interface.
 //////
 
 // Count returns the number of items in the storage.
-func (m *MongoDB) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
+func (m *SFTP) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
 	//////
 	// APM Tracing.
 	//////
@@ -135,6 +104,9 @@ func (m *MongoDB) Count(ctx context.Context, target string, prm *count.Count, op
 		return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
 	}
 
+	// Application's default values.
+	finalParam.Search = "*"
+
 	if prm != nil {
 		finalParam = prm
 	}
@@ -143,33 +115,8 @@ func (m *MongoDB) Count(ctx context.Context, target string, prm *count.Count, op
 	// Filter.
 	//////
 
-	// Matches all.
-	filter := bson.D{}
-
 	if finalParam.Search != "" {
-		filterMap := map[string]interface{}{}
-		if err := shared.Unmarshal([]byte(finalParam.Search), &filterMap); err != nil {
-			return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
-		}
-
-		filterBson, err := bson.Marshal(filterMap)
-		if err != nil {
-			return 0, customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError("bson marshal filter", customerror.WithError(err)),
-				m.GetLogger(),
-				m.GetCounterCountedFailed(),
-			)
-		}
-
-		if err := bson.Unmarshal(filterBson, &filter); err != nil {
-			return 0, customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError("bson unmarshal filter", customerror.WithError(err)),
-				m.GetLogger(),
-				m.GetCounterCountedFailed(),
-			)
-		}
+		finalParam.Search = "*"
 	}
 
 	//////
@@ -191,11 +138,7 @@ func (m *MongoDB) Count(ctx context.Context, target string, prm *count.Count, op
 		}
 	}
 
-	count, err := m.
-		Client.
-		Database(m.Database).
-		Collection(trgt).
-		CountDocuments(ctx, filter)
+	files, err := m.Client.ReadDir(trgt)
 	if err != nil {
 		return 0, customapm.TraceError(
 			ctx,
@@ -203,6 +146,14 @@ func (m *MongoDB) Count(ctx context.Context, target string, prm *count.Count, op
 			m.GetLogger(),
 			m.GetCounterCountedFailed(),
 		)
+	}
+
+	count := 0
+
+	for _, file := range files {
+		if !file.IsDir() {
+			count++
+		}
 	}
 
 	if o.PostHookFunc != nil {
@@ -228,11 +179,11 @@ func (m *MongoDB) Count(ctx context.Context, target string, prm *count.Count, op
 
 	m.GetCounterCounted().Add(1)
 
-	return count, nil
+	return int64(count), nil
 }
 
 // Delete removes data.
-func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
+func (m *SFTP) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
 	//////
 	// APM Tracing.
 	//////
@@ -293,20 +244,18 @@ func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Del
 		}
 	}
 
-	if _, err := m.
-		Client.
-		Database(m.Database).
-		Collection(trgt).
-		DeleteOne(ctx, bson.D{{"_id", id}}); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
-				storage.OperationDelete.String(),
-				customerror.WithError(err),
-			),
-			m.GetLogger(),
-			m.GetCounterDeletedFailed(),
-		)
+	if err := m.Client.Remove(trgt); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return customapm.TraceError(
+				ctx,
+				customerror.NewFailedToError(
+					storage.OperationDelete.String(),
+					customerror.WithError(err),
+				),
+				m.GetLogger(),
+				m.GetCounterDeletedFailed(),
+			)
+		}
 	}
 
 	if o.PostHookFunc != nil {
@@ -336,7 +285,7 @@ func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Del
 }
 
 // Retrieve data.
-func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
+func (m *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
 	//////
 	// APM Tracing.
 	//////
@@ -397,23 +346,8 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 		}
 	}
 
-	var result bson.M
-
-	if err := m.
-		Client.
-		Database(m.Database).
-		Collection(trgt).
-		FindOne(ctx, bson.M{"_id": id}).
-		Decode(&result); err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewHTTPError(http.StatusNotFound),
-				m.GetLogger(),
-				m.GetCounterRetrievedFailed(),
-			)
-		}
-
+	srcFile, err := m.Client.Open(trgt)
+	if err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationRetrieve.String(), customerror.WithError(err)),
@@ -422,21 +356,18 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 		)
 	}
 
-	resultBytes, err := bson.Marshal(result)
+	defer srcFile.Close()
+
+	content, err := shared.ReadAll(srcFile)
 	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("bson marshal result", customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterRetrievedFailed(),
-		)
+		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
 	}
 
-	// Convert bson.M to a Go value.
-	if err := bson.Unmarshal(resultBytes, v); err != nil {
+	// Convert content to `v`.
+	if err := shared.Unmarshal(content, v); err != nil {
 		return customapm.TraceError(
 			ctx,
-			customerror.NewFailedToError("bson unmarshal result", customerror.WithError(err)),
+			err,
 			m.GetLogger(),
 			m.GetCounterRetrievedFailed(),
 		)
@@ -475,7 +406,7 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 // projected fields) are less likely to impact performance.
 //
 // NOTE: It uses param.List.Search to query the data.
-func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List, opts ...storage.Func[*list.List]) error {
+func (m *SFTP) List(ctx context.Context, target string, v any, prm *list.List, opts ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.
 	//////
@@ -513,73 +444,11 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
 	}
 
+	// Application's default values.
+	finalParam.Search = "*"
+
 	if prm != nil {
 		finalParam = prm
-	}
-
-	// Query params.
-	cursorOpts := options.Find()
-
-	// Fields.
-	if len(finalParam.Fields) > 0 {
-		projection := bson.M{}
-
-		for _, field := range finalParam.Fields {
-			projection[field] = 1
-		}
-
-		cursorOpts.SetProjection(projection)
-	}
-
-	// Sort.
-	if len(finalParam.Sort) > 0 {
-		sortD, err := ToMongoString(finalParam.Sort.ToSort())
-		if err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
-		}
-
-		cursorOpts.SetSort(sortD)
-	}
-
-	// Offset.
-	if finalParam.Offset >= 0 {
-		cursorOpts.SetSkip(int64(finalParam.Offset))
-	}
-
-	// Limit.
-	if finalParam.Limit >= 0 {
-		cursorOpts.SetLimit(int64(finalParam.Limit))
-	}
-
-	// Filter.
-	//
-	// Matches all documents
-	filter := bson.D{}
-
-	if finalParam.Search != "" {
-		filterMap := map[string]interface{}{}
-		if err := shared.Unmarshal([]byte(finalParam.Search), &filterMap); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
-		}
-
-		filterBson, err := bson.Marshal(filterMap)
-		if err != nil {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError("bson marshal filter", customerror.WithError(err)),
-				m.GetLogger(),
-				m.GetCounterListedFailed(),
-			)
-		}
-
-		if err := bson.Unmarshal(filterBson, &filter); err != nil {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError("bson unmarshal filter", customerror.WithError(err)),
-				m.GetLogger(),
-				m.GetCounterListedFailed(),
-			)
-		}
 	}
 
 	//////
@@ -601,11 +470,7 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 		}
 	}
 
-	cursor, err := m.
-		Client.
-		Database(m.Database).
-		Collection(trgt).
-		Find(ctx, filter, cursorOpts)
+	files, err := m.Client.ReadDir(trgt)
 	if err != nil {
 		return customapm.TraceError(
 			ctx,
@@ -615,15 +480,16 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 		)
 	}
 
-	defer cursor.Close(ctx)
+	keys := ResponseListKeys{[]string{}}
 
-	if err := cursor.All(ctx, v); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("cursor all", customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterListedFailed(),
-		)
+	for _, file := range files {
+		if !file.IsDir() {
+			keys.Keys = append(keys.Keys, file.Name())
+		}
+	}
+
+	if err := storage.ParseToStruct(keys, v); err != nil {
+		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
 	}
 
 	if o.PostHookFunc != nil {
@@ -656,7 +522,7 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 //
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
-func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
+func (m *SFTP) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
 	//////
 	// APM Tracing.
 	//////
@@ -717,28 +583,45 @@ func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *cre
 		}
 	}
 
-	doc, err := m.
-		Client.
-		Database(m.Database).
-		Collection(trgt).
-		InsertOne(ctx, v)
+	b, err := shared.Marshal(v)
 	if err != nil {
+		return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
+	}
+
+	dstFile, err := m.Client.Create(trgt)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", customapm.TraceError(
+				ctx,
+				customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
+				m.GetLogger(),
+				m.GetCounterCreatedFailed(),
+			)
+		}
+	}
+
+	if dstFile == nil {
 		return "", customapm.TraceError(
 			ctx,
-			customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
+			customerror.NewFailedToError(storage.OperationCreate.String()+" file, it's nil"),
 			m.GetLogger(),
 			m.GetCounterCreatedFailed(),
 		)
 	}
 
-	finalID := id
+	defer dstFile.Close()
 
-	if id, ok := doc.InsertedID.(string); ok {
-		finalID = id
+	if _, err := dstFile.Write(b); err != nil {
+		return "", customapm.TraceError(
+			ctx,
+			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
+			m.GetLogger(),
+			m.GetCounterCreatedFailed(),
+		)
 	}
 
 	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, finalID, trgt, v, finalParam); err != nil {
+		if err := o.PostHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
 			return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
 		}
 	}
@@ -760,11 +643,11 @@ func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *cre
 
 	m.GetCounterCreated().Add(1)
 
-	return finalID, nil
+	return id, nil
 }
 
 // Update data.
-func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *update.Update, opts ...storage.Func[*update.Update]) error {
+func (m *SFTP) Update(ctx context.Context, id, target string, v any, prm *update.Update, opts ...storage.Func[*update.Update]) error {
 	//////
 	// APM Tracing.
 	//////
@@ -825,13 +708,35 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 		}
 	}
 
-	replaceOpts := options.Replace().SetUpsert(true)
+	b, err := shared.Marshal(v)
+	if err != nil {
+		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
+	}
 
-	if _, err := m.
-		Client.
-		Database(m.Database).
-		Collection(trgt).
-		ReplaceOne(ctx, bson.M{"_id": id}, v, replaceOpts); err != nil {
+	dstFile, err := m.Client.Create(trgt)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return customapm.TraceError(
+				ctx,
+				customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
+				m.GetLogger(),
+				m.GetCounterUpdatedFailed(),
+			)
+		}
+	}
+
+	if dstFile == nil {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewFailedToError(storage.OperationUpdate.String()+" file, it's nil"),
+			m.GetLogger(),
+			m.GetCounterUpdatedFailed(),
+		)
+	}
+
+	defer dstFile.Close()
+
+	if _, err := dstFile.Write(b); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
@@ -867,7 +772,7 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 }
 
 // GetClient returns the client.
-func (m *MongoDB) GetClient() any {
+func (m *SFTP) GetClient() any {
 	return m.Client
 }
 
@@ -875,17 +780,39 @@ func (m *MongoDB) GetClient() any {
 // Factory.
 //////
 
-// New creates a new MongoDB storage.
-func New(ctx context.Context, db string, cfg *Config) (*MongoDB, error) {
+// New creates a new SFTP storage.
+//
+// NOTE: addr format is: host:port.
+func New(ctx context.Context, addr string, cfg *Config, options ...Option) (*SFTP, error) {
 	// Enforces IStorage interface implementation.
-	var _ storage.IStorage = (*MongoDB)(nil)
+	var _ storage.IStorage = (*SFTP)(nil)
 
 	s, err := storage.New(ctx, Name)
 	if err != nil {
 		return nil, err
 	}
 
-	client, err := mongo.Connect(ctx, cfg)
+	u, err := url.Parse(addr)
+	if err != nil {
+		return nil, customapm.TraceError(
+			ctx,
+			customerror.NewFailedToError("convert addr to URL", customerror.WithError(err)),
+			s.GetLogger(),
+			s.GetCounterPingFailed(),
+		)
+	}
+
+	conn, err := ssh.Dial("tcp", u.Host, cfg)
+	if err != nil {
+		return nil, customapm.TraceError(
+			ctx,
+			customerror.NewFailedToError("dial", customerror.WithError(err)),
+			s.GetLogger(),
+			s.GetCounterPingFailed(),
+		)
+	}
+
+	client, err := sftp.NewClient(conn, options...)
 	if err != nil {
 		return nil, customapm.TraceError(
 			ctx,
@@ -895,33 +822,10 @@ func New(ctx context.Context, db string, cfg *Config) (*MongoDB, error) {
 		)
 	}
 
-	r := retrier.New(retrier.ExponentialBackoff(3, shared.TimeoutPing), nil)
-
-	if err := r.Run(func() error {
-		if err := client.Ping(ctx, nil); err != nil {
-			cE := customerror.NewFailedToError(
-				"ping",
-				customerror.WithError(err),
-				customerror.WithTag("retry"),
-			)
-
-			s.GetLogger().Errorln(cE)
-
-			return cE
-		}
-
-		return nil
-	}); err != nil {
-		return nil, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterPingFailed())
-	}
-
-	storage := &MongoDB{
+	storage := &SFTP{
 		Storage: s,
 
-		Client:   client,
-		Config:   cfg,
-		Database: db,
-		Target:   db,
+		Client: client,
 	}
 
 	if err := validation.Validate(storage); err != nil {
@@ -937,7 +841,7 @@ func New(ctx context.Context, db string, cfg *Config) (*MongoDB, error) {
 // Exported functionalities.
 //////
 
-// Get returns a setup MongoDB, or set it up.
+// Get returns a setup SFTP, or set it up.
 func Get() storage.IStorage {
 	if singleton == nil {
 		panic(fmt.Sprintf("%s %s not %s", Name, storage.Type, status.Initialized))

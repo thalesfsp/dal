@@ -30,6 +30,9 @@ const (
 	Testing = "testing"
 )
 
+// TimeoutPing is the timeout for ping.
+var TimeoutPing = 10 * time.Second
+
 //////
 // Timeout.
 //////

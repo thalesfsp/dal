@@ -1,11 +1,10 @@
-package file
+package memory
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
+	"strings"
+	"sync"
 
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/internal/customapm"
@@ -30,14 +29,16 @@ import (
 //////
 
 // Name of the storage.
-const Name = "file"
+const Name = "memory"
 
 // Singleton.
 var singleton storage.IStorage
 
-// File storage definition.
-type File struct {
+// Memory storage definition.
+type Memory struct {
 	*storage.Storage
+
+	client *sync.Map
 
 	// Target allows to set a static target. If it is empty, the target will be
 	// dynamic - the one set at the operation (count, create, delete, etc) time.
@@ -45,7 +46,7 @@ type File struct {
 	// For ElasticSearch, for example it doesn't have a concept of a database -
 	// the target then is the index. Due to different cases of ElasticSearch
 	// usage, the target can be static or dynamic - defined at the index time,
-	// for example: log-{YYYY}-{MM}. For File, it isn't used at all.
+	// for example: log-{YYYY}-{MM}. For Memory, it isn't used at all.
 	Target string `json:"-" validate:"omitempty,gt=0"`
 }
 
@@ -54,7 +55,7 @@ type File struct {
 //////
 
 // Count returns the number of items in the storage.
-func (s *File) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
+func (s *Memory) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
 	//////
 	// APM Tracing.
 	//////
@@ -100,15 +101,6 @@ func (s *File) Count(ctx context.Context, target string, prm *count.Count, optio
 	}
 
 	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-	}
-
-	//////
 	// Count.
 	//////
 
@@ -118,18 +110,16 @@ func (s *File) Count(ctx context.Context, target string, prm *count.Count, optio
 		}
 	}
 
-	dir := os.DirFS(trgt)
+	count := 0
 
-	matches, err := fs.Glob(dir, finalParam.Search)
-	if err != nil {
-		return 0, customapm.TraceError(ctx, customerror.NewFailedToError(
-			storage.OperationCount.String(),
-			customerror.WithError(err),
-		), s.GetLogger(), s.GetCounterCountedFailed())
-	}
+	s.client.Range(func(key, value interface{}) bool {
+		count++
+
+		return true
+	})
 
 	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, "", target, int64(len(matches)), finalParam); err != nil {
+		if err := o.PostHookFunc(ctx, s, "", target, int64(count), finalParam); err != nil {
 			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
 		}
 	}
@@ -151,11 +141,11 @@ func (s *File) Count(ctx context.Context, target string, prm *count.Count, optio
 
 	s.GetCounterCounted().Add(1)
 
-	return int64(len(matches)), nil
+	return int64(count), nil
 }
 
 // Delete removes data.
-func (s *File) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
+func (s *Memory) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
 	//////
 	// APM Tracing.
 	//////
@@ -199,15 +189,6 @@ func (s *File) Delete(ctx context.Context, id, target string, prm *delete.Delete
 	}
 
 	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-	}
-
-	//////
 	// Delete.
 	//////
 
@@ -217,21 +198,7 @@ func (s *File) Delete(ctx context.Context, id, target string, prm *delete.Delete
 		}
 	}
 
-	// Delete a file in the dir.
-	if err := os.Remove(trgt); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
-				storage.OperationDelete.String(),
-				customerror.WithError(err),
-			),
-			s.GetLogger(),
-			s.GetCounterDeletedFailed())
-	}
+	s.client.Delete(id)
 
 	if o.PostHookFunc != nil {
 		if err := o.PostHookFunc(ctx, s, id, target, nil, finalParam); err != nil {
@@ -260,7 +227,7 @@ func (s *File) Delete(ctx context.Context, id, target string, prm *delete.Delete
 }
 
 // Retrieve data.
-func (s *File) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
+func (s *Memory) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
 	//////
 	// APM Tracing.
 	//////
@@ -303,15 +270,6 @@ func (s *File) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 	}
 
 	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-	}
-
-	//////
 	// Retrieve.
 	//////
 
@@ -321,32 +279,28 @@ func (s *File) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 		}
 	}
 
-	file, err := os.Open(trgt)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewNotFoundError(storage.OperationRetrieve.String(),
-					customerror.WithError(err),
-				),
-				s.GetLogger(),
-				s.GetCounterRetrievedFailed(),
-			)
-		}
-
+	// Retrieve a value
+	val, ok := s.client.Load(id)
+	if !ok {
 		return customapm.TraceError(
 			ctx,
-			customerror.NewFailedToError(storage.OperationRetrieve.String(),
+			customerror.NewNotFoundError(storage.OperationRetrieve.String(),
 				customerror.WithError(err),
 			),
 			s.GetLogger(),
 			s.GetCounterRetrievedFailed(),
 		)
 	}
-	defer file.Close()
 
-	if err := shared.Decode(file, v); err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
+	if b, ok := val.([]byte); ok {
+		if err := shared.Unmarshal(b, v); err != nil {
+			return customapm.TraceError(
+				ctx,
+				err,
+				s.GetLogger(),
+				s.GetCounterRetrievedFailed(),
+			)
+		}
 	}
 
 	if o.PostHookFunc != nil {
@@ -379,9 +333,9 @@ func (s *File) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 //
 // NOTE: It uses params.List.Search to query the data.
 //
-// NOTE: File does not support the concept of "offset" and "limit" in the same
+// NOTE: Memory does not support the concept of "offset" and "limit" in the same
 // way that a traditional SQL database does.
-func (s *File) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
+func (s *Memory) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.
 	//////
@@ -427,15 +381,6 @@ func (s *File) List(ctx context.Context, target string, v any, prm *list.List, o
 	}
 
 	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	//////
 	// Query.
 	//////
 
@@ -445,21 +390,22 @@ func (s *File) List(ctx context.Context, target string, v any, prm *list.List, o
 		}
 	}
 
-	keys := ResponseListKeys{[]string{}}
+	items := `{"items":[`
 
-	dir := os.DirFS(trgt)
+	s.client.Range(func(key, value interface{}) bool {
+		if b, ok := value.([]byte); ok {
+			items += string(b) + ","
+		}
 
-	matches, err := fs.Glob(dir, finalParam.Search)
-	if err != nil {
-		return customapm.TraceError(ctx, customerror.NewFailedToError(
-			storage.OperationList.String(),
-			customerror.WithError(err),
-		), s.GetLogger(), s.GetCounterListedFailed())
-	}
+		return true
+	})
 
-	keys.Keys = matches
+	// Remove the last comma.
+	items = strings.TrimSuffix(items, ",")
 
-	if err := storage.ParseToStruct(keys, v); err != nil {
+	items += `]}`
+
+	if err := shared.Unmarshal([]byte(items), v); err != nil {
 		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
 	}
 
@@ -493,7 +439,7 @@ func (s *File) List(ctx context.Context, target string, v any, prm *list.List, o
 //
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
-func (s *File) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
+func (s *Memory) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
 	//////
 	// APM Tracing.
 	//////
@@ -538,15 +484,6 @@ func (s *File) Create(ctx context.Context, id, target string, v any, prm *create
 	}
 
 	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	//////
 	// Create.
 	//////
 
@@ -556,23 +493,12 @@ func (s *File) Create(ctx context.Context, id, target string, v any, prm *create
 		}
 	}
 
-	file, err := os.Create(trgt)
+	b, err := shared.Marshal(v)
 	if err != nil {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
-				storage.OperationCreate.String(),
-				customerror.WithError(err),
-			),
-			s.GetLogger(),
-			s.GetCounterCreatedFailed(),
-		)
-	}
-	defer file.Close()
-
-	if err := shared.Encode(file, v); err != nil {
 		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 	}
+
+	s.client.Store(id, b)
 
 	if o.PostHookFunc != nil {
 		if err := o.PostHookFunc(ctx, s, id, target, v, finalParam); err != nil {
@@ -603,7 +529,7 @@ func (s *File) Create(ctx context.Context, id, target string, v any, prm *create
 // Update data.
 //
 // NOTE: Not truly an update, it's an insert.
-func (s *File) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
+func (s *Memory) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
 	//////
 	// APM Tracing.
 	//////
@@ -648,15 +574,6 @@ func (s *File) Update(ctx context.Context, id, target string, v any, prm *update
 	}
 
 	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	//////
 	// Update.
 	//////
 
@@ -666,23 +583,12 @@ func (s *File) Update(ctx context.Context, id, target string, v any, prm *update
 		}
 	}
 
-	file, err := os.Create(trgt)
+	b, err := shared.Marshal(v)
 	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
-				storage.OperationUpdate.String(),
-				customerror.WithError(err),
-			),
-			s.GetLogger(),
-			s.GetCounterUpdatedFailed(),
-		)
-	}
-	defer file.Close()
-
-	if err := shared.Encode(file, v); err != nil {
 		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
 	}
+
+	s.client.Store(id, b)
 
 	if o.PostHookFunc != nil {
 		if err := o.PostHookFunc(ctx, s, id, target, v, finalParam); err != nil {
@@ -711,18 +617,18 @@ func (s *File) Update(ctx context.Context, id, target string, v any, prm *update
 }
 
 // GetClient returns the client.
-func (s *File) GetClient() any {
-	return nil
+func (s *Memory) GetClient() any {
+	return s.client
 }
 
 //////
 // Factory.
 //////
 
-// New creates a new File storage.
-func New(ctx context.Context) (*File, error) {
+// New creates a new Memory storage.
+func New(ctx context.Context) (*Memory, error) {
 	// Enforces IStorage interface implementation.
-	var _ storage.IStorage = (*File)(nil)
+	var _ storage.IStorage = (*Memory)(nil)
 
 	//////
 	// Storage.
@@ -737,8 +643,10 @@ func New(ctx context.Context) (*File, error) {
 	// Validation.
 	//////
 
-	storage := &File{
+	storage := &Memory{
 		Storage: s,
+
+		client: &sync.Map{},
 	}
 
 	if err := validation.Validate(storage); err != nil {

@@ -6,16 +6,12 @@ import (
 
 // ParseToStruct parses the given JSON (`from`) to struct (`to`).
 func ParseToStruct(from, to any) error {
-	var parsedRespBodyAsJSON []byte
-
 	pRBJ, err := shared.Marshal(from)
 	if err != nil {
 		return err
 	}
 
-	parsedRespBodyAsJSON = pRBJ
-
-	if err := shared.Unmarshal(parsedRespBodyAsJSON, to); err != nil {
+	if err := shared.Unmarshal(pRBJ, to); err != nil {
 		return err
 	}
 

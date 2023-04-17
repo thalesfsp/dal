@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/elastic/go-elasticsearch/v8"
@@ -1030,7 +1029,7 @@ func NewWithDynamicIndex(
 		)
 	}
 
-	r := retrier.New(retrier.ExponentialBackoff(3, 10*time.Second), nil)
+	r := retrier.New(retrier.ExponentialBackoff(3, shared.TimeoutPing), nil)
 
 	if err := r.Run(func() error {
 		res, err := client.Info(client.Info.WithContext(ctx))

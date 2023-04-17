@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/redis/go-redis/v9"
@@ -687,7 +686,7 @@ func New(ctx context.Context, cfg *Config) (*Redis, error) {
 
 	client := redis.NewClient(cfg)
 
-	r := retrier.New(retrier.ExponentialBackoff(3, 10*time.Second), nil)
+	r := retrier.New(retrier.ExponentialBackoff(3, shared.TimeoutPing), nil)
 
 	if err := r.Run(func() error {
 		if _, err := client.Ping(ctx).Result(); err != nil {

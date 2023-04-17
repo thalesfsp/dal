@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"io"
 	"strings"
-	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/thalesfsp/customerror"
@@ -111,51 +110,6 @@ func ReadAll(r io.Reader) ([]byte, error) {
 	}
 
 	return b, nil
-}
-
-// HasLetter checks string for an alphabetic letter.
-func HasLetter(s string) bool {
-	for _, r := range s {
-		if unicode.IsLetter(r) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// LettersToPhoneNumberKeys translates a given string, e.g.: `DOCTOR` to the
-// right telephone number keys, e.g.: `362867`.
-func LettersToPhoneNumberKeys(value string) string {
-	letterMap := map[string][]string{
-		"2": {"a", "b", "c"},
-		"3": {"d", "e", "f"},
-		"4": {"g", "h", "i"},
-		"5": {"j", "k", "l"},
-		"6": {"m", "n", "o"},
-		"7": {"p", "q", "r", "s"},
-		"8": {"t", "u", "v"},
-		"9": {"w", "x", "y", "z"},
-		"*": {"*", "?"},
-	}
-
-	translatedString := ""
-
-	for _, n := range value {
-		lowerCase := strings.ToLower(string(n))
-
-		for groupNumber, letterGroup := range letterMap {
-			for _, letter := range letterGroup {
-				if letter != lowerCase {
-					continue
-				}
-
-				translatedString += groupNumber
-			}
-		}
-	}
-
-	return translatedString
 }
 
 // PrintErrorMessages prints the concatenated error messages.

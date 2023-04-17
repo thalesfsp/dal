@@ -1,8 +1,7 @@
-package redis
+package memory
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -24,7 +23,7 @@ var listParam = &list.List{
 	Sort: customsort.SortMap{
 		"id": customsort.Asc,
 	},
-	Search: "VF*",
+	Search: "*",
 }
 
 func TestNew(t *testing.T) {
@@ -33,12 +32,6 @@ func TestNew(t *testing.T) {
 	}
 
 	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "dal_"+Name+"_test")
-
-	host := os.Getenv("REDIS_HOST")
-
-	if host == "" {
-		t.Fatal("REDIS_HOST is not set")
-	}
 
 	type args struct {
 		ctx context.Context
@@ -69,22 +62,20 @@ func TestNew(t *testing.T) {
 			ctx, cancel := context.WithTimeout(tt.args.ctx, shared.DefaultTimeout)
 			defer cancel()
 
-			cfg := &Config{
-				Addr: host,
-			}
-
-			str, err := New(ctx, cfg)
+			str, err := New(ctx)
 			assert.NoError(t, err)
 			assert.NotNil(t, str)
 
-			if str == nil || str.Client == nil {
+			if str == nil {
 				t.Fatal("str or str.Client is nil")
 			}
+
+			trgt := ""
 
 			// Ensures that document will be deleted after the test even if it
 			// fails.
 			defer func() {
-				assert.NoError(t, str.Delete(ctx, tt.args.id, shared.DatabaseName, &delete.Delete{}))
+				assert.NoError(t, str.Delete(ctx, tt.args.id, trgt, &delete.Delete{}))
 			}()
 
 			//////
@@ -93,7 +84,7 @@ func TestNew(t *testing.T) {
 
 			insertedItem := shared.TestDataWithID
 
-			id, err := str.Create(ctx, tt.args.id, shared.DatabaseName, insertedItem, &create.Create{})
+			id, err := str.Create(ctx, tt.args.id, trgt, insertedItem, &create.Create{})
 			assert.NotEmpty(t, id)
 			assert.NoError(t, err)
 
@@ -106,7 +97,7 @@ func TestNew(t *testing.T) {
 
 			var retrievedItem shared.TestDataWithIDS
 
-			assert.NoError(t, str.Retrieve(ctx, tt.args.id, shared.DatabaseName, &retrievedItem, &retrieve.Retrieve{}))
+			assert.NoError(t, str.Retrieve(ctx, tt.args.id, trgt, &retrievedItem, &retrieve.Retrieve{}))
 			assert.Equal(t, insertedItem, &retrievedItem)
 
 			//////
@@ -114,7 +105,7 @@ func TestNew(t *testing.T) {
 			//////
 
 			updatedItem := shared.UpdatedTestDataID
-			assert.NoError(t, str.Update(ctx, tt.args.id, shared.DatabaseName, updatedItem, &update.Update{}))
+			assert.NoError(t, str.Update(ctx, tt.args.id, trgt, updatedItem, &update.Update{}))
 
 			// Give enough time for the data to be updated.
 			time.Sleep(1 * time.Second)
@@ -125,14 +116,14 @@ func TestNew(t *testing.T) {
 
 			var retrievedUpdatedItem shared.TestDataWithIDS
 
-			assert.NoError(t, str.Retrieve(ctx, tt.args.id, shared.DatabaseName, &retrievedUpdatedItem, &retrieve.Retrieve{}))
+			assert.NoError(t, str.Retrieve(ctx, tt.args.id, trgt, &retrievedUpdatedItem, &retrieve.Retrieve{}))
 			assert.Equal(t, &retrievedUpdatedItem, updatedItem)
 
 			//////
 			// Should be able to count doc.
 			//////
 
-			count, err := str.Count(ctx, shared.DatabaseName, &count.Count{
+			count, err := str.Count(ctx, trgt, &count.Count{
 				Search: listParam.Search,
 			})
 
@@ -143,19 +134,17 @@ func TestNew(t *testing.T) {
 			// Should be able to list doc.
 			//////
 
-			var listItems ResponseListKeys
+			var listItems ResponseList[shared.TestDataWithIDS]
 
-			assert.NoError(t, str.List(tt.args.ctx, shared.DatabaseName, &listItems, listParam))
+			assert.NoError(t, str.List(tt.args.ctx, trgt, &listItems, listParam))
 			assert.NotNil(t, listItems)
-			assert.NotEmpty(t, listItems.Keys)
+			assert.NotEmpty(t, listItems.Items)
 
 			// Ensure that the test item is in the list.
 			found := false
 
-			for _, item := range listItems.Keys {
-				if item == tt.args.id {
-					assert.Equal(t, retrievedUpdatedItem.ID, item)
-
+			for _, item := range listItems.Items {
+				if item.Name == updatedItem.Name {
 					found = true
 
 					break
@@ -172,7 +161,7 @@ func TestNew(t *testing.T) {
 			// Should be able to delete docs.
 			//////
 
-			assert.NoError(t, str.Delete(ctx, tt.args.id, shared.DatabaseName, &delete.Delete{}))
+			assert.NoError(t, str.Delete(ctx, tt.args.id, trgt, &delete.Delete{}))
 
 			// Give enough time for the data to be deleted.
 			time.Sleep(1 * time.Second)
@@ -181,11 +170,11 @@ func TestNew(t *testing.T) {
 			// Should confirm there's no docs.
 			//////
 
-			var emptyListItems ResponseListKeys
+			var emptyListItems ResponseList[shared.TestDataWithIDS]
 
-			assert.NoError(t, str.List(tt.args.ctx, shared.DatabaseName, &listItems, listParam))
+			assert.NoError(t, str.List(tt.args.ctx, trgt, &listItems, listParam))
 			assert.NotNil(t, emptyListItems)
-			assert.Empty(t, emptyListItems.Keys)
+			assert.Empty(t, emptyListItems)
 
 			// Should check if the metrics are working.
 			assert.Equal(t, int64(1), str.GetCounterCounted().Value())

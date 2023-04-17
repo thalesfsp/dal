@@ -45,6 +45,7 @@ endif
 	@docker-compose -f resources/docker-compose.yml up -d redis
 	@docker-compose -f resources/docker-compose.yml up -d elasticsearch
 	@docker-compose -f resources/docker-compose.yml up -d postgres
+	@docker-compose -f resources/docker-compose.yml up -d sftp
 
 infra-stop:
 ifndef HAS_DOCKER_COMPOSE
