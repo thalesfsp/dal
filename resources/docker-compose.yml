@@ -47,8 +47,8 @@ services:
       - elasticsearch
 
   redis:
-    container_name: redis
     image: redis:latest
+    container_name: redis
     restart: always
     ports:
       - 6379:6379
@@ -68,6 +68,7 @@ services:
   postgres:
     image: postgres
     container_name: postgres
+    restart: always
     environment:
       - POSTGRES_DB=test
       - POSTGRES_HOST_AUTH_METHOD=trust
