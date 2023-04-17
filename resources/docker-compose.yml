@@ -84,7 +84,7 @@ services:
     container_name: sftp
     restart: always
     ports:
-      - "36123:22"
+      - "2222:22"
     environment:
       - SFTP_USERS=foo:pass
       - SFTP_PASSWORD_AUTH=false

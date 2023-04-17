@@ -49,7 +49,10 @@ jobs:
         env:
           SFTP_USERS: foo:pass
           SFTP_PASSWORD_AUTH: false
-        options: foo:pass:::upload
+        options: >- 
+          foo:pass:::upload
+        ports:
+          - "2222:22"
 
       elasticsearch:
         image: docker.elastic.co/elasticsearch/elasticsearch:8.4.3
