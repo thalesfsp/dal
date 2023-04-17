@@ -42,6 +42,10 @@ func TestNew(t *testing.T) {
 
 	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "dal_"+Name+"_test")
 
+	if os.Getenv("STFP_SKIP") == "true" {
+		t.Skip("Skipping test. STFP_SKIP is set to true.")
+	}
+
 	addr := os.Getenv("STFP_ADDR")
 	user := os.Getenv("STFP_USER")
 	pwd := os.Getenv("STFP_PASSWORD")

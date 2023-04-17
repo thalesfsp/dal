@@ -44,13 +44,15 @@ jobs:
         env:
           MONGO_INITDB_DATABASE: api
 
-      sftp:
-        image: atmoz/sftp
-        env:
-          SFTP_USERS: foo:pass
-          SFTP_PASSWORD_AUTH: false
-        ports:
-          - "2222:22"
+      # Can't use this because CI doesn't support "command"...
+      # sftp:
+      #   image: atmoz/sftp
+      #   env:
+      #     SFTP_USERS: foo:pass
+      #     SFTP_PASSWORD_AUTH: false
+      #   ports:
+      #     - "2222:22"
+      #   command: foo:pass:::upload
 
       elasticsearch:
         image: docker.elastic.co/elasticsearch/elasticsearch:8.4.3
