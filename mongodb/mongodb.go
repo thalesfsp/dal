@@ -26,6 +26,7 @@ import (
 	"github.com/thalesfsp/sypl/level"
 	"github.com/thalesfsp/validation"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -656,6 +657,8 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 //
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
+//
+//nolint:err113,goerr113
 func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
 	//////
 	// APM Tracing.
@@ -731,10 +734,23 @@ func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *cre
 		)
 	}
 
-	finalID := id
+	var finalID string
 
-	if id, ok := doc.InsertedID.(string); ok {
-		finalID = id
+	switch insertedID := doc.InsertedID.(type) {
+	case primitive.ObjectID:
+		finalID = insertedID.Hex()
+	case string:
+		finalID = insertedID
+	default:
+		return "", customapm.TraceError(
+			ctx,
+			customerror.NewFailedToError(
+				storage.OperationCreate.String(),
+				customerror.WithError(errors.New("unknown inserted ID type")),
+			),
+			m.GetLogger(),
+			m.GetCounterCreatedFailed(),
+		)
 	}
 
 	if o.PostHookFunc != nil {
