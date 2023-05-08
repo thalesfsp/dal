@@ -29,13 +29,14 @@ var listParam = &list.List{
 }
 
 func TestNew(t *testing.T) {
-	if !shared.IsEnvironment(shared.Integration) {
-		t.Skip("Skipping test. Not in e2e " + shared.Integration + "environment.")
-	}
+	// if !shared.IsEnvironment(shared.Integration) {
+	// 	t.Skip("Skipping test. Not in e2e " + shared.Integration + "environment.")
+	// }
 
 	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "dal_"+Name+"_test")
 
-	dir := os.Getenv("FILE_DIR")
+	dir := os.TempDir()
+
 	filename := os.Getenv("FILE_FILENAME")
 
 	if dir == "" || filename == "" {

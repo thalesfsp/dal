@@ -234,6 +234,15 @@ func (m *MongoDB) Count(ctx context.Context, target string, prm *count.Count, op
 
 // Delete removes data.
 func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			m.GetLogger(),
+			m.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -294,16 +303,20 @@ func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Del
 		}
 	}
 
+	var finalID interface{}
+
 	objID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
+		finalID = id
+	} else {
+		finalID = objID
 	}
 
 	if _, err := m.
 		Client.
 		Database(m.Database).
 		Collection(trgt).
-		DeleteOne(ctx, bson.D{{"_id", objID}}); err != nil {
+		DeleteOne(ctx, bson.D{{"_id", finalID}}); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(
@@ -343,6 +356,15 @@ func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Del
 
 // Retrieve data.
 func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			m.GetLogger(),
+			m.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -397,9 +419,13 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 	// Retrieve.
 	//////
 
+	var finalID interface{}
+
 	objID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
+		finalID = id
+	} else {
+		finalID = objID
 	}
 
 	if o.PreHookFunc != nil {
@@ -414,7 +440,7 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 		Client.
 		Database(m.Database).
 		Collection(trgt).
-		FindOne(ctx, bson.M{"_id": objID}).
+		FindOne(ctx, bson.M{"_id": finalID}).
 		Decode(&result); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return customapm.TraceError(
@@ -791,6 +817,15 @@ func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *cre
 
 // Update data.
 func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *update.Update, opts ...storage.Func[*update.Update]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			m.GetLogger(),
+			m.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -851,18 +886,34 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 		}
 	}
 
+	var finalID interface{}
+
 	objID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		finalID = id
+	} else {
+		finalID = objID
+	}
+
+	b, err := shared.Marshal(v)
 	if err != nil {
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
 	}
 
-	replaceOpts := options.Replace().SetUpsert(true)
+	updateFields := make(map[string]interface{})
+	if err := shared.Unmarshal(b, &updateFields); err != nil {
+		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
+	}
+
+	update := bson.M{
+		"$set": updateFields,
+	}
 
 	if _, err := m.
 		Client.
 		Database(m.Database).
 		Collection(trgt).
-		ReplaceOne(ctx, bson.M{"_id": objID}, v, replaceOpts); err != nil {
+		UpdateOne(ctx, bson.M{"_id": finalID}, update); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),

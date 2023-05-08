@@ -15,7 +15,6 @@ import (
 	"github.com/thalesfsp/params/list"
 	"github.com/thalesfsp/params/retrieve"
 	"github.com/thalesfsp/params/update"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -31,9 +30,9 @@ var listParam = &list.List{
 }
 
 func TestNew(t *testing.T) {
-	if !shared.IsEnvironment(shared.Integration) {
-		t.Skip("Skipping test. Not in e2e " + shared.Integration + "environment.")
-	}
+	// if !shared.IsEnvironment(shared.Integration) {
+	// 	t.Skip("Skipping test. Not in e2e " + shared.Integration + "environment.")
+	// }
 
 	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "dal_"+Name+"_test")
 
@@ -42,8 +41,6 @@ func TestNew(t *testing.T) {
 	if host == "" {
 		t.Fatal("MONGODB_HOST is not set")
 	}
-
-	objectID := primitive.NewObjectID().String()
 
 	type args struct {
 		ctx context.Context
@@ -101,11 +98,10 @@ func TestNew(t *testing.T) {
 			//////
 
 			insertedItem := shared.TestDataWithID
-			insertedItem.ID = objectID
 
-			id, err := str.Create(ctx, "", shared.TableName, insertedItem, &create.Create{})
+			objectID, err := str.Create(ctx, "", shared.TableName, insertedItem, &create.Create{})
 
-			assert.NotEmpty(t, id)
+			assert.NotEmpty(t, objectID)
 			assert.NoError(t, err)
 
 			// Give enough time for the data to be inserted.

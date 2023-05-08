@@ -231,6 +231,15 @@ func (p *Postgres) Count(ctx context.Context, target string, prm *count.Count, o
 
 // Delete removes data.
 func (p *Postgres) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			p.GetLogger(),
+			p.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -341,6 +350,15 @@ func (p *Postgres) Delete(ctx context.Context, id, target string, prm *delete.De
 
 // Retrieve data.
 func (p *Postgres) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			p.GetLogger(),
+			p.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -709,6 +727,15 @@ func (p *Postgres) Create(ctx context.Context, id, target string, v any, prm *cr
 
 // Update data.
 func (p *Postgres) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			p.GetLogger(),
+			p.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////

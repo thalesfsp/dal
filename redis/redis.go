@@ -161,6 +161,15 @@ func (r *Redis) Count(ctx context.Context, target string, prm *count.Count, opti
 
 // Delete removes data.
 func (r *Redis) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			r.GetLogger(),
+			r.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -252,6 +261,15 @@ func (r *Redis) Delete(ctx context.Context, id, target string, prm *delete.Delet
 
 // Retrieve data.
 func (r *Redis) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			r.GetLogger(),
+			r.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -570,6 +588,15 @@ func (r *Redis) Create(ctx context.Context, id, target string, v any, prm *creat
 //
 // NOTE: Not truly an update, it's an insert.
 func (r *Redis) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			r.GetLogger(),
+			r.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////

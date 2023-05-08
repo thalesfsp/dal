@@ -66,14 +66,14 @@ type SFTP struct {
 //////
 
 // Count returns the number of items in the storage.
-func (m *SFTP) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
+func (s *SFTP) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
 	//////
 	// APM Tracing.
 	//////
 
 	ctx, span := customapm.Trace(
 		ctx,
-		m.GetType(),
+		s.GetType(),
 		Name,
 		status.Counted.String(),
 	)
@@ -85,13 +85,13 @@ func (m *SFTP) Count(ctx context.Context, target string, prm *count.Count, optio
 
 	o, err := storage.NewOptions[*count.Count]()
 	if err != nil {
-		return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
+		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
 	}
 
 	// Iterate over the options and apply them against params.
 	for _, option := range options {
 		if err := option(o); err != nil {
-			return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
+			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
 		}
 	}
 
@@ -101,7 +101,7 @@ func (m *SFTP) Count(ctx context.Context, target string, prm *count.Count, optio
 
 	finalParam, err := count.New()
 	if err != nil {
-		return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
+		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
 	}
 
 	// Application's default values.
@@ -123,9 +123,9 @@ func (m *SFTP) Count(ctx context.Context, target string, prm *count.Count, optio
 	// Target definition.
 	//////
 
-	trgt, err := shared.TargetName(target, m.Target)
+	trgt, err := shared.TargetName(target, s.Target)
 	if err != nil {
-		return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
+		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
 	}
 
 	//////
@@ -133,18 +133,18 @@ func (m *SFTP) Count(ctx context.Context, target string, prm *count.Count, optio
 	//////
 
 	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, m, "", trgt, nil, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
+		if err := o.PreHookFunc(ctx, s, "", trgt, nil, finalParam); err != nil {
+			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
 		}
 	}
 
-	files, err := m.Client.ReadDir(trgt)
+	files, err := s.Client.ReadDir(trgt)
 	if err != nil {
 		return 0, customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationCount.String(), customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterCountedFailed(),
+			s.GetLogger(),
+			s.GetCounterCountedFailed(),
 		)
 	}
 
@@ -157,8 +157,8 @@ func (m *SFTP) Count(ctx context.Context, target string, prm *count.Count, optio
 	}
 
 	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, "", trgt, count, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
+		if err := o.PostHookFunc(ctx, s, "", trgt, count, finalParam); err != nil {
+			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
 		}
 	}
 
@@ -167,7 +167,7 @@ func (m *SFTP) Count(ctx context.Context, target string, prm *count.Count, optio
 	//////
 
 	// Correlates the transaction, span and log, and logs it.
-	m.GetLogger().PrintlnWithOptions(
+	s.GetLogger().PrintlnWithOptions(
 		level.Debug,
 		status.Counted.String(),
 		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
@@ -177,20 +177,29 @@ func (m *SFTP) Count(ctx context.Context, target string, prm *count.Count, optio
 	// Metrics.
 	//////
 
-	m.GetCounterCounted().Add(1)
+	s.GetCounterCounted().Add(1)
 
 	return int64(count), nil
 }
 
 // Delete removes data.
-func (m *SFTP) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
+func (s *SFTP) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			s.GetLogger(),
+			s.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
 
 	ctx, span := customapm.Trace(
 		ctx,
-		m.GetType(),
+		s.GetType(),
 		Name,
 		status.Deleted.String(),
 	)
@@ -202,13 +211,13 @@ func (m *SFTP) Delete(ctx context.Context, id, target string, prm *delete.Delete
 
 	o, err := storage.NewOptions[*delete.Delete]()
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
 	}
 
 	// Iterate over the options and apply them against params.
 	for _, option := range options {
 		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
 		}
 	}
 
@@ -218,7 +227,7 @@ func (m *SFTP) Delete(ctx context.Context, id, target string, prm *delete.Delete
 
 	finalParam, err := delete.New()
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
 	}
 
 	if prm != nil {
@@ -229,9 +238,9 @@ func (m *SFTP) Delete(ctx context.Context, id, target string, prm *delete.Delete
 	// Target definition.
 	//////
 
-	trgt, err := shared.TargetName(target, m.Target)
+	trgt, err := shared.TargetName(target, s.Target)
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
 	}
 
 	//////
@@ -239,12 +248,12 @@ func (m *SFTP) Delete(ctx context.Context, id, target string, prm *delete.Delete
 	//////
 
 	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, m, id, trgt, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
+		if err := o.PreHookFunc(ctx, s, id, trgt, nil, finalParam); err != nil {
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
 		}
 	}
 
-	if err := m.Client.Remove(trgt); err != nil {
+	if err := s.Client.Remove(trgt); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return customapm.TraceError(
 				ctx,
@@ -252,15 +261,15 @@ func (m *SFTP) Delete(ctx context.Context, id, target string, prm *delete.Delete
 					storage.OperationDelete.String(),
 					customerror.WithError(err),
 				),
-				m.GetLogger(),
-				m.GetCounterDeletedFailed(),
+				s.GetLogger(),
+				s.GetCounterDeletedFailed(),
 			)
 		}
 	}
 
 	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, id, trgt, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
+		if err := o.PostHookFunc(ctx, s, id, trgt, nil, finalParam); err != nil {
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
 		}
 	}
 
@@ -269,7 +278,7 @@ func (m *SFTP) Delete(ctx context.Context, id, target string, prm *delete.Delete
 	//////
 
 	// Correlates the transaction, span and log, and logs it.
-	m.GetLogger().PrintlnWithOptions(
+	s.GetLogger().PrintlnWithOptions(
 		level.Debug,
 		status.Deleted.String(),
 		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
@@ -279,20 +288,29 @@ func (m *SFTP) Delete(ctx context.Context, id, target string, prm *delete.Delete
 	// Metrics.
 	//////
 
-	m.GetCounterDeleted().Add(1)
+	s.GetCounterDeleted().Add(1)
 
 	return nil
 }
 
 // Retrieve data.
-func (m *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
+func (s *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			s.GetLogger(),
+			s.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
 
 	ctx, span := customapm.Trace(
 		ctx,
-		m.GetType(),
+		s.GetType(),
 		Name,
 		status.Retrieved.String(),
 	)
@@ -304,13 +322,13 @@ func (m *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 
 	o, err := storage.NewOptions[*retrieve.Retrieve]()
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
 	}
 
 	// Iterate over the options and apply them against params.
 	for _, option := range options {
 		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
 		}
 	}
 
@@ -320,7 +338,7 @@ func (m *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 
 	finalParam, err := retrieve.New()
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
 	}
 
 	if prm != nil {
@@ -331,9 +349,9 @@ func (m *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 	// Target definition.
 	//////
 
-	trgt, err := shared.TargetName(target, m.Target)
+	trgt, err := shared.TargetName(target, s.Target)
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
 	}
 
 	//////
@@ -341,18 +359,18 @@ func (m *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 	//////
 
 	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
+		if err := o.PreHookFunc(ctx, s, id, trgt, v, finalParam); err != nil {
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
 		}
 	}
 
-	srcFile, err := m.Client.Open(trgt)
+	srcFile, err := s.Client.Open(trgt)
 	if err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationRetrieve.String(), customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterRetrievedFailed(),
+			s.GetLogger(),
+			s.GetCounterRetrievedFailed(),
 		)
 	}
 
@@ -360,7 +378,7 @@ func (m *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 
 	content, err := shared.ReadAll(srcFile)
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
 	}
 
 	// Convert content to `v`.
@@ -368,14 +386,14 @@ func (m *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 		return customapm.TraceError(
 			ctx,
 			err,
-			m.GetLogger(),
-			m.GetCounterRetrievedFailed(),
+			s.GetLogger(),
+			s.GetCounterRetrievedFailed(),
 		)
 	}
 
 	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
+		if err := o.PostHookFunc(ctx, s, id, trgt, v, finalParam); err != nil {
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
 		}
 	}
 
@@ -384,7 +402,7 @@ func (m *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 	//////
 
 	// Correlates the transaction, span and log, and logs it.
-	m.GetLogger().PrintlnWithOptions(
+	s.GetLogger().PrintlnWithOptions(
 		level.Debug,
 		status.Retrieved.String(),
 		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
@@ -394,7 +412,7 @@ func (m *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 	// Metrics.
 	//////
 
-	m.GetCounterRetrieved().Add(1)
+	s.GetCounterRetrieved().Add(1)
 
 	return nil
 }
@@ -406,14 +424,14 @@ func (m *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 // projected fields) are less likely to impact performance.
 //
 // NOTE: It uses param.List.Search to query the data.
-func (m *SFTP) List(ctx context.Context, target string, v any, prm *list.List, opts ...storage.Func[*list.List]) error {
+func (s *SFTP) List(ctx context.Context, target string, v any, prm *list.List, opts ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.
 	//////
 
 	ctx, span := customapm.Trace(
 		ctx,
-		m.GetType(),
+		s.GetType(),
 		Name,
 		status.Listed.String(),
 	)
@@ -425,13 +443,13 @@ func (m *SFTP) List(ctx context.Context, target string, v any, prm *list.List, o
 
 	o, err := storage.NewOptions[*list.List]()
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
 	}
 
 	// Iterate over the options and apply them against params.
 	for _, option := range opts {
 		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
 		}
 	}
 
@@ -441,7 +459,7 @@ func (m *SFTP) List(ctx context.Context, target string, v any, prm *list.List, o
 
 	finalParam, err := list.New()
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
 	}
 
 	// Application's default values.
@@ -455,9 +473,9 @@ func (m *SFTP) List(ctx context.Context, target string, v any, prm *list.List, o
 	// Target definition.
 	//////
 
-	trgt, err := shared.TargetName(target, m.Target)
+	trgt, err := shared.TargetName(target, s.Target)
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
 	}
 
 	//////
@@ -465,18 +483,18 @@ func (m *SFTP) List(ctx context.Context, target string, v any, prm *list.List, o
 	//////
 
 	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, m, "", trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
+		if err := o.PreHookFunc(ctx, s, "", trgt, v, finalParam); err != nil {
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
 		}
 	}
 
-	files, err := m.Client.ReadDir(trgt)
+	files, err := s.Client.ReadDir(trgt)
 	if err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationList.String(), customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterListedFailed(),
+			s.GetLogger(),
+			s.GetCounterListedFailed(),
 		)
 	}
 
@@ -489,12 +507,12 @@ func (m *SFTP) List(ctx context.Context, target string, v any, prm *list.List, o
 	}
 
 	if err := storage.ParseToStruct(keys, v); err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
 	}
 
 	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, "", trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
+		if err := o.PostHookFunc(ctx, s, "", trgt, v, finalParam); err != nil {
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
 		}
 	}
 
@@ -503,7 +521,7 @@ func (m *SFTP) List(ctx context.Context, target string, v any, prm *list.List, o
 	//////
 
 	// Correlates the transaction, span and log, and logs it.
-	m.GetLogger().PrintlnWithOptions(
+	s.GetLogger().PrintlnWithOptions(
 		level.Debug,
 		status.Listed.String(),
 		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
@@ -513,7 +531,7 @@ func (m *SFTP) List(ctx context.Context, target string, v any, prm *list.List, o
 	// Metrics.
 	//////
 
-	m.GetCounterListed().Add(1)
+	s.GetCounterListed().Add(1)
 
 	return nil
 }
@@ -522,14 +540,14 @@ func (m *SFTP) List(ctx context.Context, target string, v any, prm *list.List, o
 //
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
-func (m *SFTP) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
+func (s *SFTP) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
 	//////
 	// APM Tracing.
 	//////
 
 	ctx, span := customapm.Trace(
 		ctx,
-		m.GetType(),
+		s.GetType(),
 		Name,
 		status.Created.String(),
 	)
@@ -541,13 +559,13 @@ func (m *SFTP) Create(ctx context.Context, id, target string, v any, prm *create
 
 	o, err := storage.NewOptions[*create.Create]()
 	if err != nil {
-		return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
+		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 	}
 
 	// Iterate over the options and apply them against params.
 	for _, option := range options {
 		if err := option(o); err != nil {
-			return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
+			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 		}
 	}
 
@@ -557,7 +575,7 @@ func (m *SFTP) Create(ctx context.Context, id, target string, v any, prm *create
 
 	finalParam, err := create.New()
 	if err != nil {
-		return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
+		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 	}
 
 	if prm != nil {
@@ -568,9 +586,9 @@ func (m *SFTP) Create(ctx context.Context, id, target string, v any, prm *create
 	// Target definition.
 	//////
 
-	trgt, err := shared.TargetName(target, m.Target)
+	trgt, err := shared.TargetName(target, s.Target)
 	if err != nil {
-		return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
+		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 	}
 
 	//////
@@ -578,24 +596,24 @@ func (m *SFTP) Create(ctx context.Context, id, target string, v any, prm *create
 	//////
 
 	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
+		if err := o.PreHookFunc(ctx, s, id, trgt, v, finalParam); err != nil {
+			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 		}
 	}
 
 	b, err := shared.Marshal(v)
 	if err != nil {
-		return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
+		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 	}
 
-	dstFile, err := m.Client.Create(trgt)
+	dstFile, err := s.Client.Create(trgt)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return "", customapm.TraceError(
 				ctx,
 				customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
-				m.GetLogger(),
-				m.GetCounterCreatedFailed(),
+				s.GetLogger(),
+				s.GetCounterCreatedFailed(),
 			)
 		}
 	}
@@ -604,8 +622,8 @@ func (m *SFTP) Create(ctx context.Context, id, target string, v any, prm *create
 		return "", customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationCreate.String()+" file, it's nil"),
-			m.GetLogger(),
-			m.GetCounterCreatedFailed(),
+			s.GetLogger(),
+			s.GetCounterCreatedFailed(),
 		)
 	}
 
@@ -615,14 +633,14 @@ func (m *SFTP) Create(ctx context.Context, id, target string, v any, prm *create
 		return "", customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterCreatedFailed(),
+			s.GetLogger(),
+			s.GetCounterCreatedFailed(),
 		)
 	}
 
 	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
+		if err := o.PostHookFunc(ctx, s, id, trgt, v, finalParam); err != nil {
+			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 		}
 	}
 
@@ -631,7 +649,7 @@ func (m *SFTP) Create(ctx context.Context, id, target string, v any, prm *create
 	//////
 
 	// Correlates the transaction, span and log, and logs it.
-	m.GetLogger().PrintlnWithOptions(
+	s.GetLogger().PrintlnWithOptions(
 		level.Debug,
 		status.Created.String(),
 		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
@@ -641,20 +659,29 @@ func (m *SFTP) Create(ctx context.Context, id, target string, v any, prm *create
 	// Metrics.
 	//////
 
-	m.GetCounterCreated().Add(1)
+	s.GetCounterCreated().Add(1)
 
 	return id, nil
 }
 
 // Update data.
-func (m *SFTP) Update(ctx context.Context, id, target string, v any, prm *update.Update, opts ...storage.Func[*update.Update]) error {
+func (s *SFTP) Update(ctx context.Context, id, target string, v any, prm *update.Update, opts ...storage.Func[*update.Update]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			s.GetLogger(),
+			s.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
 
 	ctx, span := customapm.Trace(
 		ctx,
-		m.GetType(),
+		s.GetType(),
 		Name,
 		status.Updated.String(),
 	)
@@ -666,13 +693,13 @@ func (m *SFTP) Update(ctx context.Context, id, target string, v any, prm *update
 
 	o, err := storage.NewOptions[*update.Update]()
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
 	}
 
 	// Iterate over the options and apply them against params.
 	for _, option := range opts {
 		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
 		}
 	}
 
@@ -682,7 +709,7 @@ func (m *SFTP) Update(ctx context.Context, id, target string, v any, prm *update
 
 	finalParam, err := update.New()
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
 	}
 
 	if prm != nil {
@@ -693,9 +720,9 @@ func (m *SFTP) Update(ctx context.Context, id, target string, v any, prm *update
 	// Target definition.
 	//////
 
-	trgt, err := shared.TargetName(target, m.Target)
+	trgt, err := shared.TargetName(target, s.Target)
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
 	}
 
 	//////
@@ -703,24 +730,24 @@ func (m *SFTP) Update(ctx context.Context, id, target string, v any, prm *update
 	//////
 
 	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
+		if err := o.PreHookFunc(ctx, s, id, trgt, v, finalParam); err != nil {
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
 		}
 	}
 
 	b, err := shared.Marshal(v)
 	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
 	}
 
-	dstFile, err := m.Client.Create(trgt)
+	dstFile, err := s.Client.Create(trgt)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return customapm.TraceError(
 				ctx,
 				customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
-				m.GetLogger(),
-				m.GetCounterUpdatedFailed(),
+				s.GetLogger(),
+				s.GetCounterUpdatedFailed(),
 			)
 		}
 	}
@@ -729,8 +756,8 @@ func (m *SFTP) Update(ctx context.Context, id, target string, v any, prm *update
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationUpdate.String()+" file, it's nil"),
-			m.GetLogger(),
-			m.GetCounterUpdatedFailed(),
+			s.GetLogger(),
+			s.GetCounterUpdatedFailed(),
 		)
 	}
 
@@ -740,14 +767,14 @@ func (m *SFTP) Update(ctx context.Context, id, target string, v any, prm *update
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterUpdatedFailed(),
+			s.GetLogger(),
+			s.GetCounterUpdatedFailed(),
 		)
 	}
 
 	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
+		if err := o.PostHookFunc(ctx, s, id, trgt, v, finalParam); err != nil {
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
 		}
 	}
 
@@ -756,7 +783,7 @@ func (m *SFTP) Update(ctx context.Context, id, target string, v any, prm *update
 	//////
 
 	// Correlates the transaction, span and log, and logs it.
-	m.GetLogger().PrintlnWithOptions(
+	s.GetLogger().PrintlnWithOptions(
 		level.Debug,
 		status.Updated.String(),
 		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
@@ -766,14 +793,14 @@ func (m *SFTP) Update(ctx context.Context, id, target string, v any, prm *update
 	// Metrics.
 	//////
 
-	m.GetCounterUpdated().Add(1)
+	s.GetCounterUpdated().Add(1)
 
 	return nil
 }
 
 // GetClient returns the client.
-func (m *SFTP) GetClient() any {
-	return m.Client
+func (s *SFTP) GetClient() any {
+	return s.Client
 }
 
 //////

@@ -357,6 +357,15 @@ func (es *ElasticSearch) Count(ctx context.Context, target string, prm *count.Co
 
 // Delete removes data.
 func (es *ElasticSearch) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			es.GetLogger(),
+			es.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -460,6 +469,15 @@ func (es *ElasticSearch) Delete(ctx context.Context, id, target string, prm *del
 
 // Retrieve data.
 func (es *ElasticSearch) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			es.GetLogger(),
+			es.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -867,6 +885,15 @@ func (es *ElasticSearch) Create(ctx context.Context, id, target string, v any, p
 
 // Update data.
 func (es *ElasticSearch) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			es.GetLogger(),
+			es.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////

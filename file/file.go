@@ -156,6 +156,15 @@ func (s *File) Count(ctx context.Context, target string, prm *count.Count, optio
 
 // Delete removes data.
 func (s *File) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			s.GetLogger(),
+			s.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -261,6 +270,15 @@ func (s *File) Delete(ctx context.Context, id, target string, prm *delete.Delete
 
 // Retrieve data.
 func (s *File) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			s.GetLogger(),
+			s.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -604,6 +622,15 @@ func (s *File) Create(ctx context.Context, id, target string, v any, prm *create
 //
 // NOTE: Not truly an update, it's an insert.
 func (s *File) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
+	if id == "" {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			s.GetLogger(),
+			s.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
