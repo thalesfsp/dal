@@ -294,11 +294,16 @@ func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Del
 		}
 	}
 
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
+	}
+
 	if _, err := m.
 		Client.
 		Database(m.Database).
 		Collection(trgt).
-		DeleteOne(ctx, bson.D{{"_id", id}}); err != nil {
+		DeleteOne(ctx, bson.D{{"_id", objID}}); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(
@@ -392,6 +397,11 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 	// Retrieve.
 	//////
 
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
+	}
+
 	if o.PreHookFunc != nil {
 		if err := o.PreHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
 			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
@@ -404,7 +414,7 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 		Client.
 		Database(m.Database).
 		Collection(trgt).
-		FindOne(ctx, bson.M{"_id": id}).
+		FindOne(ctx, bson.M{"_id": objID}).
 		Decode(&result); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return customapm.TraceError(
@@ -841,13 +851,18 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 		}
 	}
 
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
+	}
+
 	replaceOpts := options.Replace().SetUpsert(true)
 
 	if _, err := m.
 		Client.
 		Database(m.Database).
 		Collection(trgt).
-		ReplaceOne(ctx, bson.M{"_id": id}, v, replaceOpts); err != nil {
+		ReplaceOne(ctx, bson.M{"_id": objID}, v, replaceOpts); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
