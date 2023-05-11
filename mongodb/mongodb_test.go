@@ -2,7 +2,6 @@ package mongodb
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -113,9 +112,6 @@ func TestNew(t *testing.T) {
 			//////
 
 			var retrievedItem shared.TestDataS
-
-			// Convert id to Object ID.
-			fmt.Println(id)
 
 			assert.NoError(t, str.Retrieve(ctx, id, shared.TableName, &retrievedItem, &retrieve.Retrieve{}))
 			assert.Equal(t, insertedItem, &retrievedItem)

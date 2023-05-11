@@ -10,11 +10,7 @@ import (
 
 // Parse ES response body.
 func parseResponseBody(r io.Reader, v any) error {
-	if err := shared.Decode(r, v); err != nil {
-		return err
-	}
-
-	return nil
+	return shared.Decode(r, v)
 }
 
 // Parse ES response body when it's an error.

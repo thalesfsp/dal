@@ -11,9 +11,5 @@ func ParseToStruct(from, to any) error {
 		return err
 	}
 
-	if err := shared.Unmarshal(pRBJ, to); err != nil {
-		return err
-	}
-
-	return nil
+	return shared.Unmarshal(pRBJ, to)
 }

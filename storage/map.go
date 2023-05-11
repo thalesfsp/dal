@@ -63,7 +63,7 @@ func DeleteMany(ctx context.Context, m Map, id, target string, prm *delete.Delet
 }
 
 // ListMany will make all DAL to concurrently list.
-func ListMany[T any](ctx context.Context, m Map, target string, v T, prm *list.List, options ...Func[*list.List]) (map[string]T, error) {
+func ListMany[T any](ctx context.Context, m Map, target string, prm *list.List, options ...Func[*list.List]) (map[string]T, error) {
 	var (
 		data = map[string]T{}
 		errs concurrentloop.Errors
@@ -89,7 +89,7 @@ func ListMany[T any](ctx context.Context, m Map, target string, v T, prm *list.L
 }
 
 // RetrieveMany will make all DAL to concurrently retrieve `id`.
-func RetrieveMany[T any](ctx context.Context, m Map, id, target string, v T, prm *retrieve.Retrieve, options ...Func[*retrieve.Retrieve]) (map[string]T, error) {
+func RetrieveMany[T any](ctx context.Context, m Map, id, target string, prm *retrieve.Retrieve, options ...Func[*retrieve.Retrieve]) (map[string]T, error) {
 	var (
 		data = map[string]T{}
 		errs concurrentloop.Errors

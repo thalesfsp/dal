@@ -678,8 +678,6 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 //
 // WARN: MongoDB relies on the model (`v`) `_id` field to be set, otherwise it
 // will generate a new one. IT'S UP TO THE DEVELOPER TO SET THE `_ID` FIELD.
-//
-//nolint:err113,goerr113
 func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
 	//////
 	// APM Tracing.
@@ -758,7 +756,9 @@ func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *cre
 	var finalID string
 
 	if doc.InsertedID != nil {
-		finalID = doc.InsertedID.(primitive.ObjectID).Hex()
+		if oid, ok := doc.InsertedID.(primitive.ObjectID); ok {
+			finalID = oid.Hex()
+		}
 	}
 
 	if o.PostHookFunc != nil {

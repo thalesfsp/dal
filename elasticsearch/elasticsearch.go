@@ -181,11 +181,7 @@ func (es *ElasticSearch) CreateIndex(ctx context.Context, name, mapping string) 
 
 	defer res.Body.Close()
 
-	if err := checkResponseIsError(res, "already"); err != nil {
-		return err
-	}
-
-	return nil
+	return checkResponseIsError(res, "already")
 }
 
 // DeleteIndex deletes a new index in Elasticsearch.
@@ -208,11 +204,7 @@ func (es *ElasticSearch) DeleteIndex(ctx context.Context, name string) error {
 
 	defer res.Body.Close()
 
-	if err := checkResponseIsError(res, "no such index"); err != nil {
-		return err
-	}
-
-	return nil
+	return checkResponseIsError(res, "no such index")
 }
 
 //////
