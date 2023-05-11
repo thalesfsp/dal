@@ -2,6 +2,7 @@ package mongodb
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -97,11 +98,11 @@ func TestNew(t *testing.T) {
 			// Should be able to insert doc.
 			//////
 
-			insertedItem := shared.TestDataWithID
+			insertedItem := shared.TestData
 
-			objectID, err := str.Create(ctx, "", shared.TableName, insertedItem, &create.Create{})
+			id, err := str.Create(ctx, "", shared.TableName, insertedItem, &create.Create{})
 
-			assert.NotEmpty(t, objectID)
+			assert.NotEmpty(t, id)
 			assert.NoError(t, err)
 
 			// Give enough time for the data to be inserted.
@@ -111,19 +112,20 @@ func TestNew(t *testing.T) {
 			// Should be able to retrieve doc.
 			//////
 
-			var retrievedItem shared.TestDataWithIDS
+			var retrievedItem shared.TestDataS
 
-			assert.NoError(t, str.Retrieve(ctx, objectID, shared.TableName, &retrievedItem, &retrieve.Retrieve{}))
+			// Convert id to Object ID.
+			fmt.Println(id)
+
+			assert.NoError(t, str.Retrieve(ctx, id, shared.TableName, &retrievedItem, &retrieve.Retrieve{}))
 			assert.Equal(t, insertedItem, &retrievedItem)
 
 			//////
 			// Should be able to update doc.
 			//////
 
-			updatedItem := shared.UpdatedTestDataID
-			updatedItem.ID = objectID
-
-			assert.NoError(t, str.Update(ctx, objectID, shared.TableName, updatedItem, &update.Update{}))
+			updatedItem := shared.UpdatedTestData
+			assert.NoError(t, str.Update(ctx, id, shared.TableName, updatedItem, &update.Update{}))
 
 			// Give enough time for the data to be updated.
 			time.Sleep(1 * time.Second)
@@ -132,10 +134,10 @@ func TestNew(t *testing.T) {
 			// Should confirm the doc is updated.
 			//////
 
-			var retrievedUpdatedItem shared.TestDataWithIDS
+			var retrievedUpdatedItem shared.TestDataS
 
-			assert.NoError(t, str.Retrieve(ctx, objectID, shared.TableName, &retrievedUpdatedItem, &retrieve.Retrieve{}))
-			assert.Equal(t, &retrievedUpdatedItem, updatedItem)
+			assert.NoError(t, str.Retrieve(ctx, id, shared.TableName, &retrievedUpdatedItem, &retrieve.Retrieve{}))
+			assert.Equal(t, updatedItem, &retrievedUpdatedItem)
 
 			//////
 			// Should be able to count doc.
@@ -152,7 +154,7 @@ func TestNew(t *testing.T) {
 			// Should be able to list doc.
 			//////
 
-			var listItems []shared.TestDataWithIDS
+			var listItems []shared.TestDataS
 
 			assert.NoError(t, str.List(ctx, shared.TableName, &listItems, listParam))
 			assert.NotNil(t, listItems)
@@ -162,7 +164,7 @@ func TestNew(t *testing.T) {
 			found := false
 
 			for _, item := range listItems {
-				if item.ID == objectID {
+				if item.Name == retrievedUpdatedItem.Name {
 					assert.Equal(t, retrievedUpdatedItem, item)
 
 					found = true
@@ -181,7 +183,7 @@ func TestNew(t *testing.T) {
 			// Should be able to delete docs.
 			//////
 
-			assert.NoError(t, str.Delete(ctx, objectID, shared.TableName, &delete.Delete{}))
+			assert.NoError(t, str.Delete(ctx, id, shared.TableName, &delete.Delete{}))
 
 			// Give enough time for the data to be deleted.
 			time.Sleep(1 * time.Second)
@@ -190,7 +192,7 @@ func TestNew(t *testing.T) {
 			// Should confirm there's no docs.
 			//////
 
-			var emptyListItems []shared.TestDataWithIDS
+			var emptyListItems []shared.TestDataS
 
 			assert.NoError(t, str.List(ctx, shared.TableName, &listItems, listParam))
 			assert.Nil(t, emptyListItems)

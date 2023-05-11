@@ -157,6 +157,15 @@ func (p *Postgres) Count(ctx context.Context, target string, prm *count.Count, o
 	}
 
 	//////
+	// Target definition.
+	//////
+
+	trgt, err := shared.TargetName(target, p.Target)
+	if err != nil {
+		return 0, customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCountedFailed())
+	}
+
+	//////
 	// Params initialization.
 	//////
 
@@ -165,20 +174,18 @@ func (p *Postgres) Count(ctx context.Context, target string, prm *count.Count, o
 		return 0, customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCountedFailed())
 	}
 
-	// Application's default values.
-	finalParam.Search = "1=1"
+	defaultSearch := "SELECT COUNT(*) FROM " + trgt
 
-	if prm != nil {
-		finalParam = prm
+	if finalParam.Search == "" {
+		finalParam.Search = defaultSearch
 	}
 
-	//////
-	// Target definition.
-	//////
+	if prm != nil {
+		if prm.Search != "" {
+			prm.Search = defaultSearch
+		}
 
-	trgt, err := shared.TargetName(target, p.Target)
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCountedFailed())
+		finalParam = prm
 	}
 
 	//////
@@ -191,10 +198,8 @@ func (p *Postgres) Count(ctx context.Context, target string, prm *count.Count, o
 		}
 	}
 
-	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s;`, trgt, finalParam.Search)
-
 	var count int64
-	if err = p.Client.QueryRowContext(ctx, countQuery).Scan(&count); err != nil {
+	if err = p.Client.QueryRowContext(ctx, finalParam.Search).Scan(&count); err != nil {
 		return 0, customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationCount.String(), customerror.WithError(err)),
@@ -511,6 +516,15 @@ func (p *Postgres) List(ctx context.Context, target string, v any, prm *list.Lis
 	}
 
 	//////
+	// Target definition.
+	//////
+
+	trgt, err := shared.TargetName(target, p.Target)
+	if err != nil {
+		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
+	}
+
+	//////
 	// Params initialization.
 	//////
 
@@ -519,21 +533,18 @@ func (p *Postgres) List(ctx context.Context, target string, v any, prm *list.Lis
 		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
 	}
 
+	defaultSearch := "SELECT * FROM " + trgt
+
 	if finalParam.Search == "" {
-		finalParam.Search = "1=1"
+		finalParam.Search = defaultSearch
 	}
 
 	if prm != nil {
+		if prm.Search != "" {
+			prm.Search = defaultSearch
+		}
+
 		finalParam = prm
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, p.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
 	}
 
 	//////
@@ -546,32 +557,7 @@ func (p *Postgres) List(ctx context.Context, target string, v any, prm *list.Lis
 		}
 	}
 
-	// Build SQL query
-	sql := fmt.Sprintf(
-		"SELECT %s FROM %s WHERE %s",
-		finalParam.Fields.String(),
-		trgt,
-		finalParam.Search,
-	)
-
-	if finalParam.Sort != nil {
-		srt, err := ToSQLString(finalParam.Sort.ToSort())
-		if err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
-		}
-
-		sql += fmt.Sprintf(" ORDER BY %s", srt)
-	}
-
-	if finalParam.Limit > 0 {
-		sql += fmt.Sprintf(" LIMIT %d", finalParam.Limit)
-	}
-
-	if finalParam.Offset > 0 {
-		sql += fmt.Sprintf(" OFFSET %d", finalParam.Offset)
-	}
-
-	if err := p.Client.SelectContext(ctx, v, sql); err != nil {
+	if err := p.Client.SelectContext(ctx, v, finalParam.Search); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationList.String(), customerror.WithError(err)),

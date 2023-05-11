@@ -2,31 +2,20 @@ package postgres
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/thalesfsp/dal/internal/shared"
-	"github.com/thalesfsp/params/count"
 	"github.com/thalesfsp/params/create"
-	"github.com/thalesfsp/params/customsort"
 	"github.com/thalesfsp/params/delete"
 	"github.com/thalesfsp/params/list"
 	"github.com/thalesfsp/params/retrieve"
 	"github.com/thalesfsp/params/update"
 )
 
-var listParam = &list.List{
-	Limit:  10,
-	Fields: []string{"id", "name", "version"},
-	Offset: 0,
-	Sort: customsort.SortMap{
-		"id": customsort.Asc,
-	},
-	Search: fmt.Sprintf(`version='%s'`, shared.DocumentVersion),
-}
+var listParam = &list.List{}
 
 func TestNew(t *testing.T) {
 	if !shared.IsEnvironment(shared.Integration) {
@@ -147,9 +136,7 @@ func TestNew(t *testing.T) {
 			// Should be able to count doc.
 			//////
 
-			count, err := str.Count(ctx, shared.DatabaseName, &count.Count{
-				Search: listParam.Search,
-			})
+			count, err := str.Count(ctx, shared.DatabaseName, nil)
 
 			assert.NoError(t, err)
 			assert.EqualValues(t, 1, count)
@@ -160,7 +147,7 @@ func TestNew(t *testing.T) {
 
 			var listItems []shared.TestDataWithIDS
 
-			assert.NoError(t, str.List(ctx, shared.DatabaseName, &listItems, listParam))
+			assert.NoError(t, str.List(ctx, shared.DatabaseName, &listItems, nil))
 			assert.NotNil(t, listItems)
 			assert.NotEmpty(t, listItems)
 

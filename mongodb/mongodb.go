@@ -303,20 +303,11 @@ func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Del
 		}
 	}
 
-	var finalID interface{}
-
-	objID, err := primitive.ObjectIDFromHex(id)
-	if err != nil {
-		finalID = id
-	} else {
-		finalID = objID
-	}
-
 	if _, err := m.
 		Client.
 		Database(m.Database).
 		Collection(trgt).
-		DeleteOne(ctx, bson.D{{"_id", finalID}}); err != nil {
+		DeleteOne(ctx, IDtoFilter(id)); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(
@@ -419,15 +410,6 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 	// Retrieve.
 	//////
 
-	var finalID interface{}
-
-	objID, err := primitive.ObjectIDFromHex(id)
-	if err != nil {
-		finalID = id
-	} else {
-		finalID = objID
-	}
-
 	if o.PreHookFunc != nil {
 		if err := o.PreHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
 			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
@@ -440,7 +422,7 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 		Client.
 		Database(m.Database).
 		Collection(trgt).
-		FindOne(ctx, bson.M{"_id": finalID}).
+		FindOne(ctx, IDtoFilter(id)).
 		Decode(&result); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return customapm.TraceError(
@@ -469,7 +451,7 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 		)
 	}
 
-	// Convert bson.M to a Go value.
+	// Convert bson to a Go value.
 	if err := bson.Unmarshal(resultBytes, v); err != nil {
 		return customapm.TraceError(
 			ctx,
@@ -692,7 +674,10 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 // Create data.
 //
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
-// be set. You are better off setting the ID yourself.
+// be set.
+//
+// WARN: MongoDB relies on the model (`v`) `_id` field to be set, otherwise it
+// will generate a new one. IT'S UP TO THE DEVELOPER TO SET THE `_ID` FIELD.
 //
 //nolint:err113,goerr113
 func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
@@ -772,21 +757,8 @@ func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *cre
 
 	var finalID string
 
-	switch insertedID := doc.InsertedID.(type) {
-	case primitive.ObjectID:
-		finalID = insertedID.Hex()
-	case string:
-		finalID = insertedID
-	default:
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
-				storage.OperationCreate.String(),
-				customerror.WithError(errors.New("unknown inserted ID type")),
-			),
-			m.GetLogger(),
-			m.GetCounterCreatedFailed(),
-		)
+	if doc.InsertedID != nil {
+		finalID = doc.InsertedID.(primitive.ObjectID).Hex()
 	}
 
 	if o.PostHookFunc != nil {
@@ -886,15 +858,6 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 		}
 	}
 
-	var finalID interface{}
-
-	objID, err := primitive.ObjectIDFromHex(id)
-	if err != nil {
-		finalID = id
-	} else {
-		finalID = objID
-	}
-
 	b, err := shared.Marshal(v)
 	if err != nil {
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
@@ -913,7 +876,7 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 		Client.
 		Database(m.Database).
 		Collection(trgt).
-		UpdateOne(ctx, bson.M{"_id": finalID}, update); err != nil {
+		UpdateOne(ctx, IDtoFilter(id), update); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
