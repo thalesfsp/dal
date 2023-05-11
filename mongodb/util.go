@@ -9,6 +9,11 @@ import (
 func IDtoFilter(id string) primitive.M {
 	filter := bson.M{}
 
+	// Only process the ID if it isn't a valid ID.
+	if primitive.IsValidObjectID(id) {
+		return bson.M{"_id": id}
+	}
+
 	// Try to convert the objectID to an ObjectID.
 	finalID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
