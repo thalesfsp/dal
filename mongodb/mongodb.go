@@ -26,7 +26,6 @@ import (
 	"github.com/thalesfsp/sypl/level"
 	"github.com/thalesfsp/validation"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -307,7 +306,7 @@ func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Del
 		Client.
 		Database(m.Database).
 		Collection(trgt).
-		DeleteOne(ctx, IDtoFilter(id)); err != nil {
+		DeleteOne(ctx, bson.M{"_id": id}); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(
@@ -422,7 +421,7 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 		Client.
 		Database(m.Database).
 		Collection(trgt).
-		FindOne(ctx, IDtoFilter(id)).
+		FindOne(ctx, bson.M{"_id": id}).
 		Decode(&result); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return customapm.TraceError(
@@ -679,6 +678,15 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 // WARN: MongoDB relies on the model (`v`) `_id` field to be set, otherwise it
 // will generate a new one. IT'S UP TO THE DEVELOPER TO SET THE `_ID` FIELD.
 func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
+	if id == "" {
+		return "", customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			m.GetLogger(),
+			m.GetCounterRetrievedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -739,12 +747,11 @@ func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *cre
 		}
 	}
 
-	doc, err := m.
+	if _, err := m.
 		Client.
 		Database(m.Database).
 		Collection(trgt).
-		InsertOne(ctx, v)
-	if err != nil {
+		InsertOne(ctx, v); err != nil {
 		return "", customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
@@ -753,16 +760,8 @@ func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *cre
 		)
 	}
 
-	var finalID string
-
-	if doc.InsertedID != nil {
-		if oid, ok := doc.InsertedID.(primitive.ObjectID); ok {
-			finalID = oid.Hex()
-		}
-	}
-
 	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, finalID, trgt, v, finalParam); err != nil {
+		if err := o.PostHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
 			return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
 		}
 	}
@@ -784,7 +783,7 @@ func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *cre
 
 	m.GetCounterCreated().Add(1)
 
-	return finalID, nil
+	return id, nil
 }
 
 // Update data.
@@ -876,7 +875,7 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 		Client.
 		Database(m.Database).
 		Collection(trgt).
-		UpdateOne(ctx, IDtoFilter(id), update); err != nil {
+		UpdateOne(ctx, bson.M{"_id": id}, update); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),

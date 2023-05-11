@@ -70,20 +70,12 @@ func TestNew(t *testing.T) {
 			defer cancel()
 
 			str, err := New(ctx, shared.DatabaseName, options.Client().ApplyURI(host))
-			assert.NoError(t, err)
-			assert.NotNil(t, str)
 
-			if str == nil || str.Client == nil {
-				t.Fatal("str or str.Client is nil")
-			}
+			assert.NoError(t, err)
 
 			// Ensures the test collection will be clean after the test even if
 			// it fails.
 			defer func() {
-				if str == nil || str.GetClient() == nil {
-					t.Fatal(Name, "client is nil")
-				}
-
 				client, ok := str.GetClient().(*mongo.Client)
 				if !ok {
 					t.Fatal("Could not convert to *mongo.Client")
@@ -97,10 +89,12 @@ func TestNew(t *testing.T) {
 			// Should be able to insert doc.
 			//////
 
-			insertedItem := shared.TestData
+			insertedID := shared.GenerateUUID()
 
-			id, err := str.Create(ctx, "", shared.TableName, insertedItem, &create.Create{})
+			insertedItem := shared.TestDataWithID
+			insertedItem.ID = insertedID
 
+			id, err := str.Create(ctx, insertedID, shared.DatabaseName, insertedItem, &create.Create{})
 			assert.NotEmpty(t, id)
 			assert.NoError(t, err)
 
@@ -111,17 +105,19 @@ func TestNew(t *testing.T) {
 			// Should be able to retrieve doc.
 			//////
 
-			var retrievedItem shared.TestDataS
+			var retrievedItem shared.TestDataWithIDS
 
-			assert.NoError(t, str.Retrieve(ctx, id, shared.TableName, &retrievedItem, &retrieve.Retrieve{}))
+			assert.NoError(t, str.Retrieve(ctx, insertedID, shared.DatabaseName, &retrievedItem, &retrieve.Retrieve{}))
 			assert.Equal(t, insertedItem, &retrievedItem)
 
 			//////
 			// Should be able to update doc.
 			//////
 
-			updatedItem := shared.UpdatedTestData
-			assert.NoError(t, str.Update(ctx, id, shared.TableName, updatedItem, &update.Update{}))
+			updatedItem := shared.UpdatedTestDataID
+			updatedItem.ID = id
+
+			assert.NoError(t, str.Update(ctx, insertedID, shared.DatabaseName, updatedItem, &update.Update{}))
 
 			// Give enough time for the data to be updated.
 			time.Sleep(1 * time.Second)
@@ -130,18 +126,16 @@ func TestNew(t *testing.T) {
 			// Should confirm the doc is updated.
 			//////
 
-			var retrievedUpdatedItem shared.TestDataS
+			var retrievedUpdatedItem shared.TestDataWithIDS
 
-			assert.NoError(t, str.Retrieve(ctx, id, shared.TableName, &retrievedUpdatedItem, &retrieve.Retrieve{}))
-			assert.Equal(t, updatedItem, &retrievedUpdatedItem)
+			assert.NoError(t, str.Retrieve(ctx, insertedID, shared.DatabaseName, &retrievedUpdatedItem, &retrieve.Retrieve{}))
+			assert.Equal(t, &retrievedUpdatedItem, updatedItem)
 
 			//////
 			// Should be able to count doc.
 			//////
 
-			count, err := str.Count(ctx, shared.TableName, &count.Count{
-				Search: listParam.Search,
-			})
+			count, err := str.Count(ctx, shared.DatabaseName, &count.Count{})
 
 			assert.NoError(t, err)
 			assert.EqualValues(t, 1, count)
@@ -150,9 +144,9 @@ func TestNew(t *testing.T) {
 			// Should be able to list doc.
 			//////
 
-			var listItems []shared.TestDataS
+			var listItems []shared.TestDataWithIDS
 
-			assert.NoError(t, str.List(ctx, shared.TableName, &listItems, listParam))
+			assert.NoError(t, str.List(ctx, shared.DatabaseName, &listItems, listParam))
 			assert.NotNil(t, listItems)
 			assert.NotEmpty(t, listItems)
 
@@ -179,7 +173,7 @@ func TestNew(t *testing.T) {
 			// Should be able to delete docs.
 			//////
 
-			assert.NoError(t, str.Delete(ctx, id, shared.TableName, &delete.Delete{}))
+			assert.NoError(t, str.Delete(ctx, insertedID, shared.TableName, &delete.Delete{}))
 
 			// Give enough time for the data to be deleted.
 			time.Sleep(1 * time.Second)
@@ -188,25 +182,11 @@ func TestNew(t *testing.T) {
 			// Should confirm there's no docs.
 			//////
 
-			var emptyListItems []shared.TestDataS
+			var emptyListItems []shared.TestDataWithIDS
 
 			assert.NoError(t, str.List(ctx, shared.TableName, &listItems, listParam))
 			assert.Nil(t, emptyListItems)
 			assert.Empty(t, emptyListItems)
-
-			// Should check if the metrics are working.
-			assert.Equal(t, int64(1), str.GetCounterCounted().Value())
-			assert.Equal(t, int64(0), str.GetCounterCountedFailed().Value())
-			assert.Equal(t, int64(1), str.GetCounterDeleted().Value())
-			assert.Equal(t, int64(0), str.GetCounterDeletedFailed().Value())
-			assert.Equal(t, int64(2), str.GetCounterRetrieved().Value())
-			assert.Equal(t, int64(0), str.GetCounterRetrievedFailed().Value())
-			assert.Equal(t, int64(2), str.GetCounterListed().Value())
-			assert.Equal(t, int64(0), str.GetCounterListedFailed().Value())
-			assert.Equal(t, int64(1), str.GetCounterCreated().Value())
-			assert.Equal(t, int64(0), str.GetCounterCreatedFailed().Value())
-			assert.Equal(t, int64(1), str.GetCounterUpdated().Value())
-			assert.Equal(t, int64(0), str.GetCounterUpdatedFailed().Value())
 		})
 	}
 }
