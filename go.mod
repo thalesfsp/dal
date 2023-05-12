@@ -13,7 +13,7 @@ require (
 	github.com/pkg/sftp v1.13.5
 	github.com/redis/go-redis/v9 v9.0.4
 	github.com/stretchr/testify v1.8.2
-	github.com/thalesfsp/concurrentloop v1.1.3
+	github.com/thalesfsp/concurrentloop v1.1.4
 	github.com/thalesfsp/customerror v1.1.6
 	github.com/thalesfsp/params v0.1.1
 	github.com/thalesfsp/status v1.0.8
