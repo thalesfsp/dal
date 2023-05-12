@@ -137,8 +137,6 @@ github.com/stretchr/testify v1.7.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/
 github.com/stretchr/testify v1.8.0/go.mod h1:yNjHg4UonilssWZ8iaSj1OCr/vHnekPRkoO+kdMU+MU=
 github.com/stretchr/testify v1.8.2 h1:+h33VjcLVPDHtOdpUCuF+7gSuG3yGIftsP1YvFihtJ8=
 github.com/stretchr/testify v1.8.2/go.mod h1:w2LPCIKwWwSfY2zedu0+kehJoqGctiVI29o6fzry7u4=
-github.com/thalesfsp/concurrentloop v1.1.3 h1:ujP64h1YEkgqnu5+KU7jUAOliri9BraGd+zblKX2lnc=
-github.com/thalesfsp/concurrentloop v1.1.3/go.mod h1:v0wDZ8n/kqiVbNcgZHHEgkvK9X2fsNis9jJ/sV6O87Q=
 github.com/thalesfsp/concurrentloop v1.1.4 h1:t3aO/a1PL606LHGeni4FfIY1UXO1LLFJJrnF0Ro0FnU=
 github.com/thalesfsp/concurrentloop v1.1.4/go.mod h1:v0wDZ8n/kqiVbNcgZHHEgkvK9X2fsNis9jJ/sV6O87Q=
 github.com/thalesfsp/configurer v1.1.31 h1:5JLsHguVPLminprs1JDOhgRsuqiw1hE4dBnoTzlecds=
