@@ -113,3 +113,49 @@ type IStorage interface {
 	// GetCounterUpdatedFailed returns the metric.
 	GetCounterUpdatedFailed() *expvar.Int
 }
+
+//////
+// Generic functions.
+//////
+
+// Count data.
+func Count(ctx context.Context, s IStorage, target string, prm *count.Count, options ...Func[*count.Count]) (int64, error) {
+	return s.Count(ctx, target, prm, options...)
+}
+
+// Delete data.
+func Delete(ctx context.Context, s IStorage, id, target string, prm *delete.Delete, options ...Func[*delete.Delete]) error {
+	return s.Delete(ctx, id, target, prm, options...)
+}
+
+// Retrieve data.
+func Retrieve[T any](ctx context.Context, s IStorage, id, target string, prm *retrieve.Retrieve, options ...Func[*retrieve.Retrieve]) (T, error) {
+	var t T
+
+	if err := s.Retrieve(ctx, id, target, t, prm, options...); err != nil {
+		return *new(T), err
+	}
+
+	return t, nil
+}
+
+// List data.
+func List[T any](ctx context.Context, s IStorage, target string, prm *list.List, options ...Func[*list.List]) (T, error) {
+	var t T
+
+	if err := s.List(ctx, target, t, prm, options...); err != nil {
+		return *new(T), err
+	}
+
+	return t, nil
+}
+
+// Create data.
+func Create[T any](ctx context.Context, s IStorage, id, target string, t T, prm *create.Create, options ...Func[*create.Create]) (string, error) {
+	return s.Create(ctx, id, target, t, prm, options...)
+}
+
+// Update data.
+func Update[T any](ctx context.Context, s IStorage, id, target string, t T, prm *update.Update, options ...Func[*update.Update]) error {
+	return s.Update(ctx, id, target, t, prm, options...)
+}
