@@ -152,10 +152,10 @@ func List[T any](ctx context.Context, s IStorage, target string, prm *list.List,
 
 // Create data.
 func Create[T any](ctx context.Context, s IStorage, id, target string, t T, prm *create.Create, options ...Func[*create.Create]) (string, error) {
-	return s.Create(ctx, id, target, &t, prm, options...)
+	return s.Create(ctx, id, target, t, prm, options...)
 }
 
 // Update data.
 func Update[T any](ctx context.Context, s IStorage, id, target string, t T, prm *update.Update, options ...Func[*update.Update]) error {
-	return s.Update(ctx, id, target, &t, prm, options...)
+	return s.Update(ctx, id, target, t, prm, options...)
 }

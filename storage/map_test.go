@@ -149,7 +149,6 @@ func TestDeleteMany(t *testing.T) {
 }
 
 func TestListMany(t *testing.T) {
-
 	tests := []struct {
 		name    string
 		wantErr bool
@@ -185,7 +184,7 @@ func TestRetrieveMany(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := RetrieveMany[TestDataS](context.Background(), Map{"m1": m1, "m2": m2}, "id", "target", nil)
+			got, err := RetrieveMany[*TestDataS](context.Background(), Map{"m1": m1, "m2": m2}, "id", "target", nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("RetrieveMany() error = %v, wantErr %v", err, tt.wantErr)
 				return
