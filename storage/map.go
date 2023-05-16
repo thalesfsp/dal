@@ -19,6 +19,24 @@ import (
 // Map is a map of strgs
 type Map map[string]IStorage
 
+// String implements the Stringer interface.
+func (m Map) String() string {
+	// Iterate over the map and print the storage name.
+	// Output: "1, 2, 3"
+	var s string
+
+	for k := range m {
+		s += k + ", "
+	}
+
+	// Remove the last comma.
+	if len(s) > 0 {
+		s = s[:len(s)-2]
+	}
+
+	return s
+}
+
 // ToSlice converts Map to Slice of IStorage.
 func (m Map) ToSlice() []IStorage {
 	var s []IStorage
@@ -132,7 +150,8 @@ func RetrieveMany[T any](
 }
 
 // UpdateMany updates all documents concurrently.
-func UpdateMany(ctx context.Context,
+func UpdateMany(
+	ctx context.Context,
 	m Map,
 	id, target string,
 	v any,
