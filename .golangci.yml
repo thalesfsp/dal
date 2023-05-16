@@ -87,6 +87,7 @@ issues:
         - ifshort
         - maligned
         - maintidx
+        - goconst
 
     - path: doc.go
       linters:

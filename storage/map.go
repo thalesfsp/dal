@@ -38,6 +38,8 @@ func (m Map) String() string {
 }
 
 // ToSlice converts Map to Slice of IStorage.
+//
+//nolint:prealloc
 func (m Map) ToSlice() []IStorage {
 	var s []IStorage
 
