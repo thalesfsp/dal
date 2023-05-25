@@ -145,6 +145,8 @@ github.com/thalesfsp/customerror v1.1.6 h1:yEEFimTTqwxw5D6kzgIPOI9lop0dMpF+Ua3Kh
 github.com/thalesfsp/customerror v1.1.6/go.mod h1:cofE04NncfKRQL6SQnVkpkXlgeSwZCcU0BcrE95saXg=
 github.com/thalesfsp/params v0.1.1 h1:cUVC7abOx+N63r4lU/GXjKMkocE1G6zCw3PWKMfR27M=
 github.com/thalesfsp/params v0.1.1/go.mod h1:guAShbqNNoDwoCUE4a8ZdqzgOMoFfKoPTizcN6dlYTY=
+github.com/thalesfsp/params v0.1.3 h1:CHwMTSKCMtGwT4QFk+L+zNf77SBpMUIBFhMKruPZP2o=
+github.com/thalesfsp/params v0.1.3/go.mod h1:IlZEAsCHABTH32neauCD9m5Rb2QijrXRfnXP95X0ghU=
 github.com/thalesfsp/status v1.0.8 h1:AqR9PIThXRUp6h3GrcoXDOpKpDQ5QYLE+DiQ15/8K3I=
 github.com/thalesfsp/status v1.0.8/go.mod h1:ZwlaaU4tPETPq/wf3bsS/sVqSQpMUPMK7iTqkSSJqVY=
 github.com/thalesfsp/sypl v1.9.14 h1:pbh3VAywN0W5/lR4vXqEEXYV9dw4I7feJzlunufjdy8=
