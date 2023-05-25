@@ -15,6 +15,7 @@ import (
 	"github.com/thalesfsp/params/list"
 	"github.com/thalesfsp/params/retrieve"
 	"github.com/thalesfsp/params/update"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -26,7 +27,8 @@ var listParam = &list.List{
 	Sort: customsort.SortMap{
 		"id": customsort.Asc,
 	},
-	Search: `{"version":"` + shared.DocumentVersion + `"}`,
+	// Search: `{"version":"` + shared.DocumentVersion + `"}`,
+	Any: bson.M{"version": shared.DocumentVersion},
 }
 
 func TestNew(t *testing.T) {

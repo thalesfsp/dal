@@ -572,32 +572,15 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 	// Filter.
 	//
 	// Matches all documents
-	filter := bson.D{}
+	var filter bson.M
 
-	if finalParam.Search != "" {
-		filterMap := map[string]interface{}{}
-		if err := shared.Unmarshal([]byte(finalParam.Search), &filterMap); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
-		}
+	if flt, ok := prm.Any.(bson.M); ok {
+		filter = flt
+	}
 
-		filterBson, err := bson.Marshal(filterMap)
-		if err != nil {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError("bson marshal filter", customerror.WithError(err)),
-				m.GetLogger(),
-				m.GetCounterListedFailed(),
-			)
-		}
-
-		if err := bson.Unmarshal(filterBson, &filter); err != nil {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError("bson unmarshal filter", customerror.WithError(err)),
-				m.GetLogger(),
-				m.GetCounterListedFailed(),
-			)
-		}
+	// If filter is empty, matches everyrthing.
+	if filter == nil {
+		filter = bson.M{}
 	}
 
 	//////
