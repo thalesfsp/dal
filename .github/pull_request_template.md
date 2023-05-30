@@ -1,6 +1,6 @@
 ## Summary
 
-Please provide a summary if this PR isn't connected to ClickUp.
+Please provide a summary of this PR if it isn't connected to ClickUp.
 
 ## Documentation
 
@@ -8,7 +8,7 @@ Please make sure you have documented the changes (in the code, README, or Swimm 
 
 ## Configuration
 
-Please make sure you have update `config.go` file and all environments in Vault. DO NOT push any `.env` file.
+Please make sure you have updated the `config.go` file and all environments in Vault. DO NOT push any `.env` file.
 
 ## Pre-commit
 
