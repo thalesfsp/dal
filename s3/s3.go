@@ -3,13 +3,16 @@ package s3
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/internal/customapm"
@@ -62,6 +65,10 @@ type S3 struct {
 	// usage, the target can be static or dynamic - defined at the index time,
 	// for example: log-{YYYY}-{MM}. For S3, it isn't used at all.
 	Target string `json:"-" validate:"omitempty,gt=0"`
+
+	// S3 manager is an specialized uploader for S3 which supports multipart
+	// uploads.
+	uploader *s3manager.Uploader
 }
 
 //////
@@ -526,6 +533,8 @@ func (s *S3) List(ctx context.Context, target string, v any, prm *list.List, opt
 
 // Create data.
 //
+// NOTE: `v` can be a file, a string, or an struct.
+//
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
 func (s *S3) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
@@ -591,19 +600,49 @@ func (s *S3) Create(ctx context.Context, id, target string, v any, prm *create.C
 		}
 	}
 
-	b, err := shared.Marshal(v)
+	// Prepare the input for the S3 upload request.
+	uploadInput := &s3manager.UploadInput{
+		Bucket: aws.String(s.Bucket),
+		Key:    aws.String(trgt),
+	}
+
+	// Use a type switch to handle different types of content.
+	switch content := v.(type) {
+	case *os.File:
+		// If the content is a file, ensure it gets closed after we're done with it.
+		defer content.Close()
+
+		// Read the entire content of the file into a byte slice.
+		b, err := shared.ReadAll(content)
+		if err != nil {
+			// If an error occurred, log it and return.
+			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+		}
+
+		// Set the body of the S3 upload request to the body reader.
+		uploadInput.Body = bytes.NewReader(b)
+
+	case string:
+		// Set the body of the S3 upload request to the body reader.
+		uploadInput.Body = bytes.NewReader([]byte(content))
+
+	default:
+		// If the content is neither a file nor a string, assume it's a struct and marshal it to JSON.
+		jsonData, err := shared.Marshal(content)
+		if err != nil {
+			// If an error occurred, log it and return.
+			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+		}
+
+		// Set the body and the content type of the S3 upload request.
+		uploadInput.Body = bytes.NewReader(jsonData)
+		uploadInput.ContentType = aws.String("application/json")
+	}
+
+	// Perform the S3 upload request.
+	uO, err := s.uploader.Upload(uploadInput)
 	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	input := &s3.PutObjectInput{
-		Bucket:      aws.String(s.Bucket),
-		Key:         aws.String(trgt),
-		Body:        bytes.NewReader(b),
-		ContentType: aws.String("application/json"),
-	}
-
-	if _, err = s.Client.PutObjectWithContext(ctx, input); err != nil {
+		// If an error occurred, log it and return.
 		return "", customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(
@@ -638,7 +677,7 @@ func (s *S3) Create(ctx context.Context, id, target string, v any, prm *create.C
 
 	s.GetCounterCreated().Add(1)
 
-	return id, nil
+	return uO.Location, nil
 }
 
 // Update data.
@@ -776,6 +815,10 @@ func (s *S3) GetClient() any {
 
 // New creates a new S3 storage.
 func New(ctx context.Context, bucket string, cfg *Config) (*S3, error) {
+	if singleton != nil {
+		return singleton.(*S3), nil
+	}
+
 	// Enforces IStorage interface implementation.
 	var _ storage.IStorage = (*S3)(nil)
 
@@ -837,6 +880,8 @@ func New(ctx context.Context, bucket string, cfg *Config) (*S3, error) {
 		Bucket: bucket,
 		Client: client,
 		Config: cfg,
+
+		uploader: s3manager.NewUploader(sess),
 	}
 
 	if err := validation.Validate(storage); err != nil {
@@ -868,4 +913,71 @@ func Get() storage.IStorage {
 // Set sets the storage, primarily used for testing.
 func Set(s storage.IStorage) {
 	singleton = s
+}
+
+// RetrieveSigned generates a pre-signed URL for an S3 object.
+//
+// This function generates a pre-signed URL that allows anyone with the URL to
+// retrieve the specified object from S3, even if they don't have AWS credentials.
+// The URL is valid for the specified duration.
+//
+// Parameters:
+// - ctx: The context in which the function is called. This is used for error tracing.
+// - s: The S3 storage interface. This must have an underlying type of *s3.S3.
+// - bucket: The name of the S3 bucket containing the object.
+// - key: The key (path) of the object in the S3 bucket.
+// - expire: The duration for which the pre-signed URL is valid.
+//
+// Returns:
+// - The pre-signed URL as a string. This can be used to retrieve the object.
+// - An error if the operation failed, or nil if the operation succeeded.
+func RetrieveSigned(
+	ctx context.Context,
+	s storage.IStorage,
+	target, bucket string,
+	expire time.Duration,
+) (string, error) {
+	// Assert that the underlying type of s.GetClient() is *s3.S3.
+	client, ok := s.GetClient().(*s3.S3)
+	if !ok {
+		// If the assertion failed, return an error.
+		//
+		//nolint:goerr113
+		return "", customapm.TraceError(
+			ctx,
+			customerror.NewFailedToError(
+				storage.OperationRetrieve.String(),
+				customerror.WithError(errors.New("failed to retrieve client")),
+			),
+			s.GetLogger(),
+			s.GetCounterCreatedFailed(),
+		)
+	}
+
+	// Prepare the input for the S3 GetObject request.
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(target),
+	}
+
+	// Generate the GetObject request.
+	req, _ := client.GetObjectRequest(input)
+
+	// Generate the pre-signed URL.
+	url, err := req.Presign(expire)
+	if err != nil {
+		// If an error occurred, trace it and return.
+		return "", customapm.TraceError(
+			ctx,
+			customerror.NewFailedToError(
+				storage.OperationRetrieve.String(),
+				customerror.WithError(err),
+			),
+			s.GetLogger(),
+			s.GetCounterCreatedFailed(),
+		)
+	}
+
+	// Return the pre-signed URL and no error.
+	return url, nil
 }
