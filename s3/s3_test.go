@@ -31,7 +31,7 @@ var listParam = &list.List{
 }
 
 func TestNew(t *testing.T) {
-	if !shared.IsEnvironment("hahaha") {
+	if !shared.IsEnvironment(shared.Integration) {
 		t.Skip("Skipping test. Not in e2e " + shared.Integration + "environment.")
 	}
 
