@@ -816,7 +816,12 @@ func (s *S3) GetClient() any {
 // New creates a new S3 storage.
 func New(ctx context.Context, bucket string, cfg *Config) (*S3, error) {
 	if singleton != nil {
-		return singleton.(*S3), nil
+		s3Storage, ok := singleton.(*S3)
+		if !ok {
+			return nil, customerror.NewFailedToError("retrieve client")
+		}
+
+		return s3Storage, nil
 	}
 
 	// Enforces IStorage interface implementation.
