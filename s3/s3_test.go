@@ -3,6 +3,7 @@ package s3
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ var listParam = &list.List{
 }
 
 func TestNew(t *testing.T) {
-	if !shared.IsEnvironment(shared.Integration) {
+	if !shared.IsEnvironment("hahaha") {
 		t.Skip("Skipping test. Not in e2e " + shared.Integration + "environment.")
 	}
 
@@ -45,9 +46,8 @@ func TestNew(t *testing.T) {
 
 	kiD := os.Getenv("AWS_ACCESS_KEY_ID")
 	sAK := os.Getenv("AWS_SECRET_ACCESS_KEY")
-	sT := os.Getenv("AWS_SESSION_TOKEN")
 
-	if kiD == "" || sAK == "" || sT == "" {
+	if kiD == "" || sAK == "" {
 		t.Skip("Skipping test. Missing creds")
 	}
 
@@ -213,6 +213,110 @@ func TestNew(t *testing.T) {
 			assert.Equal(t, int64(0), str.GetCounterCreatedFailed().Value())
 			assert.Equal(t, int64(1), str.GetCounterUpdated().Value())
 			assert.Equal(t, int64(0), str.GetCounterUpdatedFailed().Value())
+		})
+	}
+}
+
+//nolint:gosec
+func TestNew_RetrieveSigned(t *testing.T) {
+	if !shared.IsEnvironment(shared.Integration) {
+		t.Skip("Skipping test. Not in e2e " + shared.Integration + "environment.")
+	}
+
+	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "s3_test")
+
+	bucket := os.Getenv("AWS_BUCKET")
+	region := os.Getenv("AWS_REGION")
+
+	if bucket == "" || region == "" {
+		t.Fatal("Need to set AWS_BUCKET and AWS_REGION environment variables")
+	}
+
+	kiD := os.Getenv("AWS_ACCESS_KEY_ID")
+	sAK := os.Getenv("AWS_SECRET_ACCESS_KEY")
+
+	if kiD == "" || sAK == "" {
+		t.Skip("Skipping test. Missing creds")
+	}
+
+	type args struct {
+		ctx context.Context
+		id  string
+	}
+	tests := []struct {
+		name    string
+		args    args
+		want    any
+		wantErr bool
+	}{
+		{
+			name: "Shoud work - E2E",
+			args: args{
+				ctx: context.Background(),
+				id:  shared.DocumentID + "-signed",
+			},
+			want:    nil,
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			//////
+			// Tear up.
+			//////
+
+			ctx, cancel := context.WithTimeout(tt.args.ctx, shared.DefaultTimeout)
+			defer cancel()
+
+			cfg := &Config{
+				Region: aws.String(region),
+			}
+
+			str, err := New(ctx, bucket, cfg)
+			assert.NoError(t, err)
+			assert.NotNil(t, str)
+
+			if str == nil || str.Client == nil {
+				t.Fatal("str or str.Client is nil")
+			}
+
+			trgt := fmt.Sprintf("dal-s3-test-%s.json", tt.args.id)
+
+			// Ensures that document will be deleted after the test even if it
+			// fails.
+			defer func() {
+				assert.NoError(t, str.Delete(ctx, tt.args.id, trgt, &delete.Delete{}))
+			}()
+
+			//////
+			// Should be able to insert doc.
+			//////
+
+			insertedItem := shared.TestDataWithID
+
+			id, err := str.Create(ctx, tt.args.id, trgt, insertedItem, &create.Create{})
+			assert.NotEmpty(t, id)
+			assert.NoError(t, err)
+
+			// Give enough time for the data to be inserted.
+			time.Sleep(1 * time.Second)
+
+			//////
+			// Should be able to retrieve doc.
+			//////
+
+			url, err := RetrieveSigned(ctx, str, trgt, bucket, 3*time.Minute)
+			assert.NoError(t, err)
+
+			// Open the URL which is a json file and confirm.
+			resp, err := http.Get(url)
+			assert.NoError(t, err)
+
+			defer resp.Body.Close()
+
+			body, err := shared.ReadAll(resp.Body)
+			assert.NoError(t, err)
+			assert.Equal(t, `{"id":"VFzrpYMBXu5BQSZxo0qX","name":"test","version":"1.0.0"}`, string(body))
 		})
 	}
 }
