@@ -13,7 +13,7 @@ require (
 	github.com/pkg/sftp v1.13.5
 	github.com/redis/go-redis/v9 v9.0.5
 	github.com/stretchr/testify v1.8.2
-	github.com/thalesfsp/concurrentloop v1.1.11
+	github.com/thalesfsp/concurrentloop v1.1.14
 	github.com/thalesfsp/customerror v1.1.6
 	github.com/thalesfsp/params v0.1.3
 	github.com/thalesfsp/status v1.0.12
@@ -21,7 +21,7 @@ require (
 	github.com/thalesfsp/validation v0.0.2
 	go.elastic.co/apm v1.15.0
 	go.mongodb.org/mongo-driver v1.11.6
-	golang.org/x/crypto v0.9.0
+	golang.org/x/crypto v0.10.0
 )
 
 require (
@@ -40,7 +40,7 @@ require (
 	github.com/gabriel-vasile/mimetype v1.4.2 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
-	github.com/go-playground/validator/v10 v10.14.0 // indirect
+	github.com/go-playground/validator/v10 v10.14.1 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/jcchavezs/porto v0.4.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
@@ -63,10 +63,10 @@ require (
 	go.elastic.co/fastjson v1.1.0 // indirect
 	golang.org/x/lint v0.0.0-20210508222113-6edffad5e616 // indirect
 	golang.org/x/mod v0.10.0 // indirect
-	golang.org/x/net v0.10.0 // indirect
+	golang.org/x/net v0.11.0 // indirect
 	golang.org/x/sync v0.2.0 // indirect
-	golang.org/x/sys v0.8.0 // indirect
-	golang.org/x/text v0.9.0 // indirect
+	golang.org/x/sys v0.9.0 // indirect
+	golang.org/x/text v0.10.0 // indirect
 	golang.org/x/tools v0.9.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
