@@ -19,6 +19,10 @@ import (
 // Map is a map of strgs
 type Map map[string]IStorage
 
+//////
+// Methods.
+//////
+
 // String implements the Stringer interface.
 func (m Map) String() string {
 	// Iterate over the map and print the storage name.
@@ -50,8 +54,12 @@ func (m Map) ToSlice() []IStorage {
 	return s
 }
 
-// CountMany returns a slice of int64 with the count of all DALs.
-func CountMany(
+//////
+// 1:N Operations.
+//////
+
+// CountFromMany counts documents concurrently against all DALs in the map.
+func CountFromMany(
 	ctx context.Context,
 	m Map,
 	target string,
@@ -69,8 +77,8 @@ func CountMany(
 	return r, nil
 }
 
-// CreateMany returns a slice of string with the id of all documents inserted.
-func CreateMany[T any](
+// CreateIntoMany creates one document concurrently against all DALs in the map.
+func CreateIntoMany[T any](
 	ctx context.Context,
 	m Map,
 	id, target string,
@@ -89,8 +97,8 @@ func CreateMany[T any](
 	return r, nil
 }
 
-// DeleteMany deletes all documents concurrently.
-func DeleteMany(
+// DeleteFromMany deletes one documents concurrently against all DALs in the map.
+func DeleteFromMany(
 	ctx context.Context,
 	m Map,
 	id, target string,
@@ -112,9 +120,10 @@ func DeleteMany(
 	return r, nil
 }
 
-// ListMany returns a slice of T with all documents. The result of each DAL is
-// flattened into a single slice.
-func ListMany[T any](
+// ListFromMany lists documents concurrently against all DALs in the map.
+//
+// NOTE: The results are flattened into a single slice.
+func ListFromMany[T any](
 	ctx context.Context,
 	m Map,
 	target string,
@@ -132,8 +141,9 @@ func ListMany[T any](
 	return Flatten2D(r), nil
 }
 
-// RetrieveMany returns a slice of T from all DALs.
-func RetrieveMany[T any](
+// RetrieveFromMany retrieves one document concurrently against all DALs in the
+// map.
+func RetrieveFromMany[T any](
 	ctx context.Context,
 	m Map,
 	id, target string,
@@ -151,8 +161,8 @@ func RetrieveMany[T any](
 	return r, nil
 }
 
-// UpdateMany updates all documents concurrently.
-func UpdateMany(
+// UpdateIntoMany updates one document concurrently against all DALs in the map.
+func UpdateIntoMany(
 	ctx context.Context,
 	m Map,
 	id, target string,
@@ -162,6 +172,99 @@ func UpdateMany(
 ) ([]bool, error) {
 	r, errs := concurrentloop.Map(ctx, m.ToSlice(), func(ctx context.Context, s IStorage) (bool, error) {
 		if err := Update(ctx, s, id, target, v, prm, options...); err != nil {
+			return false, err
+		}
+
+		return true, nil
+	})
+
+	if len(errs) > 0 {
+		return nil, errs[0]
+	}
+
+	return r, nil
+}
+
+//////
+// N:1 Operations.
+//////
+
+// CreateMany creates many documents concurrently against the same DAL.
+func CreateMany[T any](
+	ctx context.Context,
+	str IStorage,
+	target string,
+	prm *create.Create,
+	itemsMap map[string]T,
+) ([]string, error) {
+	r, errs := concurrentloop.MapM(ctx, itemsMap, func(ctx context.Context, key string, item T) (string, error) {
+		id, err := Create(ctx, str, key, target, item, prm)
+		if err != nil {
+			return "", err
+		}
+
+		return id, nil
+	})
+
+	if len(errs) > 0 {
+		return nil, errs[0]
+	}
+
+	return r, nil
+}
+
+// DeleteMany deletes many documents concurrently against the same DAL.
+func DeleteMany(
+	ctx context.Context,
+	str IStorage,
+	target string,
+	prm *delete.Delete,
+	ids ...string,
+) ([]bool, error) {
+	r, errs := concurrentloop.Map(ctx, ids, func(ctx context.Context, id string) (bool, error) {
+		if err := Delete(ctx, str, id, target, prm); err != nil {
+			return false, err
+		}
+
+		return true, nil
+	})
+
+	if len(errs) > 0 {
+		return nil, errs[0]
+	}
+
+	return r, nil
+}
+
+// RetrieveMany retrieves many documents concurrently against the same DAL.
+func RetrieveMany[T any](
+	ctx context.Context,
+	str IStorage,
+	target string,
+	prm *retrieve.Retrieve,
+	ids ...string,
+) ([]T, error) {
+	r, errs := concurrentloop.Map(ctx, ids, func(ctx context.Context, id string) (T, error) {
+		return Retrieve[T](ctx, str, id, target, prm)
+	})
+
+	if len(errs) > 0 {
+		return nil, errs[0]
+	}
+
+	return r, nil
+}
+
+// UpdateMany updates many documents concurrently against the same DAL.
+func UpdateMany[T any](
+	ctx context.Context,
+	str IStorage,
+	target string,
+	prm *update.Update,
+	itemsMap map[string]T,
+) ([]bool, error) {
+	r, errs := concurrentloop.MapM(ctx, itemsMap, func(ctx context.Context, key string, item T) (bool, error) {
+		if err := Update(ctx, str, key, target, item, prm); err != nil {
 			return false, err
 		}
 

@@ -92,7 +92,7 @@ var m2 = &Mock{
 	},
 }
 
-func TestCreateMany(t *testing.T) {
+func TestCreateIntoMany(t *testing.T) {
 	tests := []struct {
 		name    string
 		want    []string
@@ -111,7 +111,161 @@ func TestCreateMany(t *testing.T) {
 			m["m1"] = m1
 			m["m2"] = m2
 
-			got, err := CreateMany(ctx, m, "id", "target", "value", nil)
+			got, err := CreateIntoMany(ctx, m, "id", "target", "value", nil)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("CreateMany() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			assert.Contains(t, tt.want, got[0])
+			assert.Contains(t, tt.want, got[1])
+		})
+	}
+}
+
+func TestDeleteFromMany(t *testing.T) {
+	tests := []struct {
+		name    string
+		want    []bool
+		wantErr bool
+	}{
+		{
+			name: "Should work",
+			want: []bool{true, true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := DeleteFromMany(context.Background(), Map{"m1": m1, "m2": m2}, "id", "target", nil)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("DeleteMany() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			assert.Contains(t, tt.want, got[0])
+			assert.Contains(t, tt.want, got[1])
+		})
+	}
+}
+
+func TestListFromMany(t *testing.T) {
+	tests := []struct {
+		name    string
+		wantErr bool
+	}{
+		{
+			name: "Should work",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ListFromMany[string](context.Background(), Map{"m1": m1, "m2": m2}, "target", nil)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ListMany() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			assert.Contains(t, got, "mock1")
+			assert.Contains(t, got, "mock2")
+			assert.Contains(t, got, "mock3")
+			assert.Contains(t, got, "mock4")
+		})
+	}
+}
+
+func TestRetrieveFromMany(t *testing.T) {
+	tests := []struct {
+		name    string
+		wantErr bool
+	}{
+		{
+			name: "Should work",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := RetrieveFromMany[*TestDataS](context.Background(), Map{"m1": m1, "m2": m2}, "id", "target", nil)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("RetrieveMany() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if got[0].K != "mock1" && got[0].K != "mock2" {
+				t.Errorf("RetrieveMany() got = %v, want %v", got[0].K, "mock1 or mock2")
+			}
+
+			if got[1].K != "mock1" && got[1].K != "mock2" {
+				t.Errorf("RetrieveMany() got = %v, want %v", got[1].K, "mock1 or mock2")
+			}
+		})
+	}
+}
+
+func TestUpdateIntoMany(t *testing.T) {
+	tests := []struct {
+		name    string
+		want    []bool
+		wantErr bool
+	}{
+		{
+			name: "Should work",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := UpdateIntoMany(context.Background(), Map{"m1": m1, "m2": m2}, "id", "target", "value", nil)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("UpdateMany() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			assert.Len(t, got, 2)
+			assert.Contains(t, got, true)
+		})
+	}
+}
+
+func TestCountFromMany(t *testing.T) {
+	tests := []struct {
+		name    string
+		want    []int64
+		wantErr bool
+	}{
+		{
+			name: "Should work",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := CountFromMany(context.Background(), Map{"m1": m1, "m2": m2}, "target", nil)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("CountMany() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			assert.Len(t, got, 2)
+			assert.Contains(t, got, int64(10))
+			assert.Contains(t, got, int64(20))
+		})
+	}
+}
+
+func TestCreateMany(t *testing.T) {
+	tests := []struct {
+		name    string
+		want    []string
+		wantErr bool
+	}{
+		{
+			name: "Should work",
+			want: []string{"mock1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			got, err := CreateMany(ctx, m1, "target", nil, map[string]string{"1": "content1", "2": "content2"})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("CreateMany() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -136,7 +290,7 @@ func TestDeleteMany(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := DeleteMany(context.Background(), Map{"m1": m1, "m2": m2}, "id", "target", nil)
+			got, err := DeleteMany(context.Background(), m1, "target", nil, "1", "2")
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DeleteMany() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -148,55 +302,35 @@ func TestDeleteMany(t *testing.T) {
 	}
 }
 
-func TestListMany(t *testing.T) {
-	tests := []struct {
-		name    string
-		wantErr bool
-	}{
-		{
-			name: "Should work",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := ListMany[string](context.Background(), Map{"m1": m1, "m2": m2}, "target", nil)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ListMany() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-
-			assert.Contains(t, got, "mock1")
-			assert.Contains(t, got, "mock2")
-			assert.Contains(t, got, "mock3")
-			assert.Contains(t, got, "mock4")
-		})
-	}
-}
-
 func TestRetrieveMany(t *testing.T) {
 	tests := []struct {
 		name    string
+		want    []TestDataS
 		wantErr bool
 	}{
 		{
 			name: "Should work",
+			want: []TestDataS{
+				{
+					K: "mock1",
+				},
+			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := RetrieveMany[*TestDataS](context.Background(), Map{"m1": m1, "m2": m2}, "id", "target", nil)
+			ctx := context.Background()
+
+			got, err := RetrieveMany[TestDataS](ctx, m1, "target", nil, "1", "2")
 			if (err != nil) != tt.wantErr {
 				t.Errorf("RetrieveMany() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
-			if got[0].K != "mock1" && got[0].K != "mock2" {
-				t.Errorf("RetrieveMany() got = %v, want %v", got[0].K, "mock1 or mock2")
-			}
+			t.Logf("got: %+v", got)
 
-			if got[1].K != "mock1" && got[1].K != "mock2" {
-				t.Errorf("RetrieveMany() got = %v, want %v", got[1].K, "mock1 or mock2")
-			}
+			assert.Contains(t, tt.want, got[0])
+			assert.Contains(t, tt.want, got[1])
 		})
 	}
 }
@@ -209,43 +343,19 @@ func TestUpdateMany(t *testing.T) {
 	}{
 		{
 			name: "Should work",
+			want: []bool{true, true},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := UpdateMany(context.Background(), Map{"m1": m1, "m2": m2}, "id", "target", "value", nil)
+			got, err := UpdateMany(context.Background(), m1, "target", nil, map[string]string{"1": "content1", "2": "content2"})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("UpdateMany() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
-			assert.Len(t, got, 2)
-			assert.Contains(t, got, true)
-		})
-	}
-}
-
-func TestCountMany(t *testing.T) {
-	tests := []struct {
-		name    string
-		want    []int64
-		wantErr bool
-	}{
-		{
-			name: "Should work",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := CountMany(context.Background(), Map{"m1": m1, "m2": m2}, "target", nil)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("CountMany() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-
-			assert.Len(t, got, 2)
-			assert.Contains(t, got, int64(10))
-			assert.Contains(t, got, int64(20))
+			assert.Contains(t, tt.want, got[0])
+			assert.Contains(t, tt.want, got[1])
 		})
 	}
 }
