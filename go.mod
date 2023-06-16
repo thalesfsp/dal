@@ -20,7 +20,7 @@ require (
 	github.com/thalesfsp/sypl v1.9.14
 	github.com/thalesfsp/validation v0.0.2
 	go.elastic.co/apm v1.15.0
-	go.mongodb.org/mongo-driver v1.11.6
+	go.mongodb.org/mongo-driver v1.11.7
 	golang.org/x/crypto v0.10.0
 )
 
