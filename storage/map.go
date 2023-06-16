@@ -71,7 +71,7 @@ func CountFromMany(
 	})
 
 	if len(errs) > 0 {
-		return nil, errs[0]
+		return nil, errs
 	}
 
 	return r, nil
@@ -91,7 +91,7 @@ func CreateIntoMany[T any](
 	})
 
 	if len(errs) > 0 {
-		return nil, errs[0]
+		return nil, errs
 	}
 
 	return r, nil
@@ -114,7 +114,7 @@ func DeleteFromMany(
 	})
 
 	if len(errs) > 0 {
-		return nil, errs[0]
+		return nil, errs
 	}
 
 	return r, nil
@@ -135,7 +135,7 @@ func ListFromMany[T any](
 	})
 
 	if len(errs) > 0 {
-		return nil, errs[0]
+		return nil, errs
 	}
 
 	return Flatten2D(r), nil
@@ -179,7 +179,7 @@ func UpdateIntoMany(
 	})
 
 	if len(errs) > 0 {
-		return nil, errs[0]
+		return nil, errs
 	}
 
 	return r, nil
@@ -207,7 +207,7 @@ func CreateMany[T any](
 	})
 
 	if len(errs) > 0 {
-		return nil, errs[0]
+		return nil, errs
 	}
 
 	return r, nil
@@ -230,7 +230,7 @@ func DeleteMany(
 	})
 
 	if len(errs) > 0 {
-		return nil, errs[0]
+		return nil, errs
 	}
 
 	return r, nil
@@ -249,7 +249,7 @@ func RetrieveMany[T any](
 	})
 
 	if len(errs) > 0 {
-		return nil, errs[0]
+		return nil, errs
 	}
 
 	return r, nil
@@ -272,7 +272,7 @@ func UpdateMany[T any](
 	})
 
 	if len(errs) > 0 {
-		return nil, errs[0]
+		return nil, errs
 	}
 
 	return r, nil
