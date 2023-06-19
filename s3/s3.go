@@ -689,7 +689,7 @@ func (s *S3) Update(ctx context.Context, id, target string, v any, prm *update.U
 			ctx,
 			customerror.NewRequiredError("id"),
 			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
+			s.GetCounterUpdatedFailed(),
 		)
 	}
 
@@ -746,7 +746,7 @@ func (s *S3) Update(ctx context.Context, id, target string, v any, prm *update.U
 	}
 
 	//////
-	// Update.
+	// Create.
 	//////
 
 	if o.PreHookFunc != nil {
@@ -755,26 +755,56 @@ func (s *S3) Update(ctx context.Context, id, target string, v any, prm *update.U
 		}
 	}
 
-	b, err := shared.Marshal(v)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
+	// Prepare the input for the S3 upload request.
+	uploadInput := &s3manager.UploadInput{
+		Bucket: aws.String(s.Bucket),
+		Key:    aws.String(trgt),
 	}
 
-	input := &s3.PutObjectInput{
-		Bucket:      aws.String(s.Bucket),
-		Key:         aws.String(trgt),
-		Body:        bytes.NewReader(b),
-		ContentType: aws.String("application/json"),
+	// Use a type switch to handle different types of content.
+	switch content := v.(type) {
+	case *os.File:
+		// If the content is a file, ensure it gets closed after we're done with it.
+		defer content.Close()
+
+		// Read the entire content of the file into a byte slice.
+		b, err := shared.ReadAll(content)
+		if err != nil {
+			// If an error occurred, log it and return.
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
+		}
+
+		// Set the body of the S3 upload request to the body reader.
+		uploadInput.Body = bytes.NewReader(b)
+
+	case string:
+		// Set the body of the S3 upload request to the body reader.
+		uploadInput.Body = bytes.NewReader([]byte(content))
+
+	default:
+		// If the content is neither a file nor a string, assume it's a struct and marshal it to JSON.
+		jsonData, err := shared.Marshal(content)
+		if err != nil {
+			// If an error occurred, log it and return.
+			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
+		}
+
+		// Set the body and the content type of the S3 upload request.
+		uploadInput.Body = bytes.NewReader(jsonData)
+		uploadInput.ContentType = aws.String("application/json")
 	}
 
-	if _, err = s.Client.PutObjectWithContext(ctx, input); err != nil {
+	// Perform the S3 upload request.
+	if _, err := s.uploader.Upload(uploadInput); err != nil {
+		// If an error occurred, log it and return.
 		return customapm.TraceError(
 			ctx,
-			customerror.NewFailedToError(storage.OperationUpdate.String(),
+			customerror.NewFailedToError(
+				storage.OperationCreate.String(),
 				customerror.WithError(err),
 			),
 			s.GetLogger(),
-			s.GetCounterCountedFailed(),
+			s.GetCounterUpdatedFailed(),
 		)
 	}
 
