@@ -12,7 +12,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/pkg/sftp v1.13.5
 	github.com/redis/go-redis/v9 v9.0.5
-	github.com/stretchr/testify v1.8.2
+	github.com/stretchr/testify v1.8.4
 	github.com/thalesfsp/concurrentloop v1.2.0
 	github.com/thalesfsp/customerror v1.1.6
 	github.com/thalesfsp/params v0.1.3
@@ -56,6 +56,7 @@ require (
 	github.com/prometheus/procfs v0.10.1 // indirect
 	github.com/santhosh-tekuri/jsonschema v1.2.4 // indirect
 	github.com/thalesfsp/configurer v1.1.31 // indirect
+	github.com/thalesfsp/httpclient v1.0.13 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.1.2 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
