@@ -181,7 +181,7 @@ func (s *S3) Delete(ctx context.Context, id, target string, prm *delete.Delete, 
 			ctx,
 			customerror.NewRequiredError("id"),
 			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
+			s.GetCounterDeletedFailed(),
 		)
 	}
 

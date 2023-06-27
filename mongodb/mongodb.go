@@ -238,7 +238,7 @@ func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Del
 			ctx,
 			customerror.NewRequiredError("id"),
 			m.GetLogger(),
-			m.GetCounterRetrievedFailed(),
+			m.GetCounterDeletedFailed(),
 		)
 	}
 
@@ -666,7 +666,7 @@ func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *cre
 			ctx,
 			customerror.NewRequiredError("id"),
 			m.GetLogger(),
-			m.GetCounterRetrievedFailed(),
+			m.GetCounterCreatedFailed(),
 		)
 	}
 
@@ -776,7 +776,7 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 			ctx,
 			customerror.NewRequiredError("id"),
 			m.GetLogger(),
-			m.GetCounterRetrievedFailed(),
+			m.GetCounterUpdatedFailed(),
 		)
 	}
 

@@ -166,7 +166,7 @@ func (r *Redis) Delete(ctx context.Context, id, target string, prm *delete.Delet
 			ctx,
 			customerror.NewRequiredError("id"),
 			r.GetLogger(),
-			r.GetCounterRetrievedFailed(),
+			r.GetCounterDeletedFailed(),
 		)
 	}
 
@@ -593,7 +593,7 @@ func (r *Redis) Update(ctx context.Context, id, target string, v any, prm *updat
 			ctx,
 			customerror.NewRequiredError("id"),
 			r.GetLogger(),
-			r.GetCounterRetrievedFailed(),
+			r.GetCounterUpdatedFailed(),
 		)
 	}
 

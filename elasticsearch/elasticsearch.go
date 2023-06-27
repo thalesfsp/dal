@@ -354,7 +354,7 @@ func (es *ElasticSearch) Delete(ctx context.Context, id, target string, prm *del
 			ctx,
 			customerror.NewRequiredError("id"),
 			es.GetLogger(),
-			es.GetCounterRetrievedFailed(),
+			es.GetCounterDeletedFailed(),
 		)
 	}
 
@@ -882,7 +882,7 @@ func (es *ElasticSearch) Update(ctx context.Context, id, target string, v any, p
 			ctx,
 			customerror.NewRequiredError("id"),
 			es.GetLogger(),
-			es.GetCounterRetrievedFailed(),
+			es.GetCounterUpdatedFailed(),
 		)
 	}
 

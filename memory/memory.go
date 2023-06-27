@@ -151,7 +151,7 @@ func (s *Memory) Delete(ctx context.Context, id, target string, prm *delete.Dele
 			ctx,
 			customerror.NewRequiredError("id"),
 			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
+			s.GetCounterDeletedFailed(),
 		)
 	}
 
@@ -553,7 +553,7 @@ func (s *Memory) Update(ctx context.Context, id, target string, v any, prm *upda
 			ctx,
 			customerror.NewRequiredError("id"),
 			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
+			s.GetCounterUpdatedFailed(),
 		)
 	}
 

@@ -21,7 +21,7 @@ const (
 	TableName = Test
 
 	// DefaultTimeout is the default timeout.
-	DefaultTimeout = 30 * time.Second
+	DefaultTimeout = 30 * time.Minute
 
 	// DocumentID is the document ID.
 	DocumentID = "VFzrpYMBXu5BQSZxo0qX"

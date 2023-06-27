@@ -189,7 +189,7 @@ func (s *SFTP) Delete(ctx context.Context, id, target string, prm *delete.Delete
 			ctx,
 			customerror.NewRequiredError("id"),
 			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
+			s.GetCounterDeletedFailed(),
 		)
 	}
 
@@ -671,7 +671,7 @@ func (s *SFTP) Update(ctx context.Context, id, target string, v any, prm *update
 			ctx,
 			customerror.NewRequiredError("id"),
 			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
+			s.GetCounterUpdatedFailed(),
 		)
 	}
 

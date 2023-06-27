@@ -44,3 +44,5 @@ html
 
 # Terraform
 resources/terraform/.terraform/
+
+*.db

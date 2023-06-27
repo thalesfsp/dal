@@ -1,4 +1,4 @@
-package insightly
+package sqlite
 
 import (
 	"context"
@@ -8,28 +8,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/thalesfsp/dal/internal/shared"
-	"github.com/thalesfsp/params/count"
 	"github.com/thalesfsp/params/create"
-	"github.com/thalesfsp/params/customsort"
 	"github.com/thalesfsp/params/delete"
-	"github.com/thalesfsp/params/list"
 	"github.com/thalesfsp/params/retrieve"
 	"github.com/thalesfsp/params/update"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
-
-var listParam = &list.List{
-	Limit:  10,
-	Fields: []string{"id", "name", "version"},
-	Offset: 0,
-	Sort: customsort.SortMap{
-		"id": customsort.Asc,
-	},
-	// Search: `{"version":"` + shared.DocumentVersion + `"}`,
-	Any: bson.M{"version": shared.DocumentVersion},
-}
 
 func TestNew(t *testing.T) {
 	if !shared.IsEnvironment(shared.Integration) {
@@ -38,14 +21,15 @@ func TestNew(t *testing.T) {
 
 	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "dal_"+Name+"_test")
 
-	host := os.Getenv("MONGODB_HOST")
+	host := os.Getenv("SQLITE_DB")
 
 	if host == "" {
-		t.Fatal("MONGODB_HOST is not set")
+		t.Fatal("SQLITE_DB is not set")
 	}
 
 	type args struct {
 		ctx context.Context
+		id  string
 	}
 	tests := []struct {
 		name    string
@@ -57,6 +41,7 @@ func TestNew(t *testing.T) {
 			name: "Shoud work - E2E",
 			args: args{
 				ctx: context.Background(),
+				id:  shared.DocumentID,
 			},
 			want:    nil,
 			wantErr: false,
@@ -71,32 +56,45 @@ func TestNew(t *testing.T) {
 			ctx, cancel := context.WithTimeout(tt.args.ctx, shared.DefaultTimeout)
 			defer cancel()
 
-			str, err := New(ctx, shared.DatabaseName, options.Client().ApplyURI(host))
-
+			str, err := New(ctx, host)
 			assert.NoError(t, err)
+			assert.NotNil(t, str)
 
-			// Ensures the test collection will be clean after the test even if
-			// it fails.
+			if str == nil || str.Client == nil {
+				t.Fatal("str or str.Client is nil")
+			}
+
+			// Ensures that document will be deleted after the test even if it
+			// fails.
 			defer func() {
-				client, ok := str.GetClient().(*mongo.Client)
-				if !ok {
-					t.Fatal("Could not convert to *mongo.Client")
+				// Get client (cast to *sqlx.DB) and delete "test" table
+				// content.
+				if str == nil || str.GetClient() == nil {
+					t.Fatal(Name, "client is nil")
 				}
 
-				// Drop collection.
-				assert.NoError(t, client.Database(shared.DatabaseName).Collection(shared.TableName).Drop(ctx))
+				defer str.Client.Close()
+
+				assert.NoError(t, str.deleteTable(ctx, shared.TableName))
 			}()
+
+			// Create db.
+			_ = str.createDB(ctx, shared.DatabaseName)
+
+			// Create table.
+			assert.NoError(t, str.createTable(ctx, shared.DatabaseName, `
+			id varchar(255) PRIMARY KEY,
+            name varchar(255) NOT NULL,
+            version varchar(255) NOT NULL
+			`))
 
 			//////
 			// Should be able to insert doc.
 			//////
 
-			insertedID := shared.GenerateUUID()
-
 			insertedItem := shared.TestDataWithID
-			insertedItem.ID = insertedID
 
-			id, err := str.Create(ctx, insertedID, shared.DatabaseName, insertedItem, &create.Create{})
+			id, err := str.Create(ctx, tt.args.id, shared.DatabaseName, insertedItem, &create.Create{})
 			assert.NotEmpty(t, id)
 			assert.NoError(t, err)
 
@@ -109,7 +107,7 @@ func TestNew(t *testing.T) {
 
 			var retrievedItem shared.TestDataWithIDS
 
-			assert.NoError(t, str.Retrieve(ctx, insertedID, shared.DatabaseName, &retrievedItem, &retrieve.Retrieve{}))
+			assert.NoError(t, str.Retrieve(ctx, tt.args.id, shared.DatabaseName, &retrievedItem, &retrieve.Retrieve{}))
 			assert.Equal(t, insertedItem, &retrievedItem)
 
 			//////
@@ -117,9 +115,7 @@ func TestNew(t *testing.T) {
 			//////
 
 			updatedItem := shared.UpdatedTestDataID
-			updatedItem.ID = id
-
-			assert.NoError(t, str.Update(ctx, insertedID, shared.DatabaseName, updatedItem, &update.Update{}))
+			assert.NoError(t, str.Update(ctx, tt.args.id, shared.DatabaseName, updatedItem, &update.Update{}))
 
 			// Give enough time for the data to be updated.
 			time.Sleep(1 * time.Second)
@@ -130,14 +126,14 @@ func TestNew(t *testing.T) {
 
 			var retrievedUpdatedItem shared.TestDataWithIDS
 
-			assert.NoError(t, str.Retrieve(ctx, insertedID, shared.DatabaseName, &retrievedUpdatedItem, &retrieve.Retrieve{}))
+			assert.NoError(t, str.Retrieve(ctx, tt.args.id, shared.DatabaseName, &retrievedUpdatedItem, &retrieve.Retrieve{}))
 			assert.Equal(t, &retrievedUpdatedItem, updatedItem)
 
 			//////
 			// Should be able to count doc.
 			//////
 
-			count, err := str.Count(ctx, shared.DatabaseName, &count.Count{})
+			count, err := str.Count(ctx, shared.DatabaseName, nil)
 
 			assert.NoError(t, err)
 			assert.EqualValues(t, 1, count)
@@ -148,7 +144,7 @@ func TestNew(t *testing.T) {
 
 			var listItems []shared.TestDataWithIDS
 
-			assert.NoError(t, str.List(ctx, shared.DatabaseName, &listItems, listParam))
+			assert.NoError(t, str.List(ctx, shared.DatabaseName, &listItems, nil))
 			assert.NotNil(t, listItems)
 			assert.NotEmpty(t, listItems)
 
@@ -156,7 +152,7 @@ func TestNew(t *testing.T) {
 			found := false
 
 			for _, item := range listItems {
-				if item.Name == retrievedUpdatedItem.Name {
+				if item.ID == tt.args.id {
 					assert.Equal(t, retrievedUpdatedItem, item)
 
 					found = true
@@ -175,7 +171,7 @@ func TestNew(t *testing.T) {
 			// Should be able to delete docs.
 			//////
 
-			assert.NoError(t, str.Delete(ctx, insertedID, shared.TableName, &delete.Delete{}))
+			assert.NoError(t, str.Delete(ctx, tt.args.id, shared.DatabaseName, &delete.Delete{}))
 
 			// Give enough time for the data to be deleted.
 			time.Sleep(1 * time.Second)
@@ -186,9 +182,23 @@ func TestNew(t *testing.T) {
 
 			var emptyListItems []shared.TestDataWithIDS
 
-			assert.NoError(t, str.List(ctx, shared.TableName, &listItems, listParam))
+			assert.NoError(t, str.List(ctx, shared.DatabaseName, &emptyListItems, nil))
 			assert.Nil(t, emptyListItems)
 			assert.Empty(t, emptyListItems)
+
+			// Should check if the metrics are working.
+			assert.Equal(t, int64(1), str.GetCounterCounted().Value())
+			assert.Equal(t, int64(0), str.GetCounterCountedFailed().Value())
+			assert.Equal(t, int64(1), str.GetCounterDeleted().Value())
+			assert.Equal(t, int64(0), str.GetCounterDeletedFailed().Value())
+			assert.Equal(t, int64(2), str.GetCounterRetrieved().Value())
+			assert.Equal(t, int64(0), str.GetCounterRetrievedFailed().Value())
+			assert.Equal(t, int64(2), str.GetCounterListed().Value())
+			assert.Equal(t, int64(0), str.GetCounterListedFailed().Value())
+			assert.Equal(t, int64(1), str.GetCounterCreated().Value())
+			assert.Equal(t, int64(0), str.GetCounterCreatedFailed().Value())
+			assert.Equal(t, int64(1), str.GetCounterUpdated().Value())
+			assert.Equal(t, int64(0), str.GetCounterUpdatedFailed().Value())
 		})
 	}
 }

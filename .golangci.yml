@@ -72,6 +72,10 @@ issues:
         - testpackage
         - cyclop
 
+    - path: sqlite/sqlite.go
+      linters:
+        - gci
+
     - path: _test\.go
       linters:
         - funlen

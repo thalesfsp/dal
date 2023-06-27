@@ -185,7 +185,7 @@ func TestNew(t *testing.T) {
 
 			var emptyListItems []shared.TestDataWithIDS
 
-			assert.NoError(t, str.List(ctx, shared.DatabaseName, &listItems, listParam))
+			assert.NoError(t, str.List(ctx, shared.DatabaseName, &emptyListItems, listParam))
 			assert.Nil(t, emptyListItems)
 			assert.Empty(t, emptyListItems)
 

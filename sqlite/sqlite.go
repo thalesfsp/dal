@@ -1,4 +1,4 @@
-package postgres
+package sqlite
 
 import (
 	"context"
@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"net/http"
 
-	// Import the postgres driver.
-	_ "github.com/doug-martin/goqu/v9/dialect/postgres"
-
 	"github.com/doug-martin/goqu/v9"
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
+
+	// Import the driver.
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/internal/customapm"
 	"github.com/thalesfsp/dal/internal/logging"
@@ -38,7 +38,7 @@ import (
 //////
 
 // Name of the storage.
-const Name = "postgres"
+const Name = "sqlite3"
 
 // Singleton.
 var singleton storage.IStorage
@@ -49,8 +49,8 @@ type Config struct {
 	DriverName     string `json:"driverName" validate:"required"`
 }
 
-// Postgres storage definition.
-type Postgres struct {
+// SQLite storage definition.
+type SQLite struct {
 	*storage.Storage
 
 	// Client is the postgres client.
@@ -87,7 +87,7 @@ func ToSQLString(s customsort.Sort) (string, error) {
 	return sqlFormatted, nil
 }
 
-func (p *Postgres) createDB(ctx context.Context, name string) error {
+func (p *SQLite) createDB(ctx context.Context, name string) error {
 	if _, err := p.
 		Client.
 		ExecContext(ctx, fmt.Sprintf("CREATE DATABASE %s", pq.QuoteIdentifier(name))); err != nil {
@@ -97,7 +97,7 @@ func (p *Postgres) createDB(ctx context.Context, name string) error {
 	return nil
 }
 
-func (p *Postgres) deleteTable(ctx context.Context, name string) error {
+func (p *SQLite) deleteTable(ctx context.Context, name string) error {
 	if _, err := p.
 		Client.
 		ExecContext(ctx, fmt.Sprintf("DROP TABLE %s", name)); err != nil {
@@ -107,7 +107,7 @@ func (p *Postgres) deleteTable(ctx context.Context, name string) error {
 	return nil
 }
 
-func (p *Postgres) createTable(ctx context.Context, name, description string) error {
+func (p *SQLite) createTable(ctx context.Context, name, description string) error {
 	sql := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s (
 		%s
@@ -127,7 +127,7 @@ func (p *Postgres) createTable(ctx context.Context, name, description string) er
 //////
 
 // Count returns the number of items in the storage.
-func (p *Postgres) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
+func (p *SQLite) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
 	//////
 	// APM Tracing.
 	//////
@@ -235,7 +235,7 @@ func (p *Postgres) Count(ctx context.Context, target string, prm *count.Count, o
 }
 
 // Delete removes data.
-func (p *Postgres) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
+func (p *SQLite) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
 	if id == "" {
 		return customapm.TraceError(
 			ctx,
@@ -354,7 +354,7 @@ func (p *Postgres) Delete(ctx context.Context, id, target string, prm *delete.De
 }
 
 // Retrieve data.
-func (p *Postgres) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
+func (p *SQLite) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
 	if id == "" {
 		return customapm.TraceError(
 			ctx,
@@ -486,7 +486,7 @@ func (p *Postgres) Retrieve(ctx context.Context, id, target string, v any, prm *
 // List data.
 //
 // NOTE: It uses param.List.Search to query the data.
-func (p *Postgres) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
+func (p *SQLite) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.
 	//////
@@ -596,7 +596,7 @@ func (p *Postgres) List(ctx context.Context, target string, v any, prm *list.Lis
 //
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
-func (p *Postgres) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
+func (p *SQLite) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
 	//////
 	// APM Tracing.
 	//////
@@ -712,7 +712,7 @@ func (p *Postgres) Create(ctx context.Context, id, target string, v any, prm *cr
 }
 
 // Update data.
-func (p *Postgres) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
+func (p *SQLite) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
 	if id == "" {
 		return customapm.TraceError(
 			ctx,
@@ -832,7 +832,7 @@ func (p *Postgres) Update(ctx context.Context, id, target string, v any, prm *up
 }
 
 // GetClient returns the client.
-func (p *Postgres) GetClient() any {
+func (p *SQLite) GetClient() any {
 	return p.Client
 }
 
@@ -841,9 +841,9 @@ func (p *Postgres) GetClient() any {
 //////
 
 // New creates a new postgres storage.
-func New(ctx context.Context, dataSource string) (*Postgres, error) {
+func New(ctx context.Context, dataSource string) (*SQLite, error) {
 	// Enforces IStorage interface implementation.
-	var _ storage.IStorage = (*Postgres)(nil)
+	var _ storage.IStorage = (*SQLite)(nil)
 
 	s, err := storage.New(ctx, Name)
 	if err != nil {
@@ -885,7 +885,7 @@ func New(ctx context.Context, dataSource string) (*Postgres, error) {
 		return nil, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterPingFailed())
 	}
 
-	storage := &Postgres{
+	storage := &SQLite{
 		Storage: s,
 
 		Client: client,
