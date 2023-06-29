@@ -778,6 +778,9 @@ func (s *S3) Update(ctx context.Context, id, target string, v any, prm *update.U
 		// Set the body of the S3 upload request to the body reader.
 		uploadInput.Body = bytes.NewReader([]byte(content))
 
+	case []byte:
+		uploadInput.Body = bytes.NewReader(content)
+
 	default:
 		// If the content is neither a file nor a string, assume it's a struct and marshal it to JSON.
 		jsonData, err := shared.Marshal(content)
