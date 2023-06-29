@@ -14,11 +14,11 @@ import (
 var (
 	// ErrRequiredPostHook is the error returned when the post-hook function is
 	// missing.
-	ErrRequiredPostHook = customerror.NewRequiredError("post-hook function", customerror.WithCode("ERR_REQUIRED_POST_HOOK"))
+	ErrRequiredPostHook = customerror.NewRequiredError("post-hook function", customerror.WithErrorCode("ERR_REQUIRED_POST_HOOK"))
 
 	// ErrRequiredPreHook is the error returned when the pre-hook function is
 	// missing.
-	ErrRequiredPreHook = customerror.NewRequiredError("pre-hook function", customerror.WithCode("ERR_REQUIRED_PRE_HOOK"))
+	ErrRequiredPreHook = customerror.NewRequiredError("pre-hook function", customerror.WithErrorCode("ERR_REQUIRED_PRE_HOOK"))
 )
 
 // HookFunc specifies the function that will be called before and after the
