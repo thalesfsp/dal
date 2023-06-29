@@ -764,9 +764,6 @@ func (s *S3) Update(ctx context.Context, id, target string, v any, prm *update.U
 	// Use a type switch to handle different types of content.
 	switch content := v.(type) {
 	case *os.File:
-		// If the content is a file, ensure it gets closed after we're done with it.
-		defer content.Close()
-
 		// Read the entire content of the file into a byte slice.
 		b, err := shared.ReadAll(content)
 		if err != nil {
