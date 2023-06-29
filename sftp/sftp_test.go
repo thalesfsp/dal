@@ -40,11 +40,11 @@ func TestNew(t *testing.T) {
 		t.Skip("Skipping test. Not in e2e " + shared.Integration + "environment.")
 	}
 
-	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "dal_"+Name+"_test")
-
 	if os.Getenv("SFTP_SKIP") == "true" {
 		t.Skip("Skipping test. SFTP_SKIP is set to true.")
 	}
+
+	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "dal_"+Name+"_test")
 
 	addr := os.Getenv("STFP_ADDR")
 	user := os.Getenv("STFP_USER")

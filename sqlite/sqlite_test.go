@@ -19,6 +19,10 @@ func TestNew(t *testing.T) {
 		t.Skip("Skipping test. Not in e2e " + shared.Integration + "environment.")
 	}
 
+	if os.Getenv("SQLITE_SKIP") == "true" {
+		t.Skip("Skipping test. SFTP_SKIP is set to true.")
+	}
+
 	t.Setenv("HTTPCLIENT_METRICS_PREFIX", "dal_"+Name+"_test")
 
 	host := os.Getenv("SQLITE_DB")
