@@ -305,7 +305,7 @@ func (p *SQLite) Delete(ctx context.Context, id, target string, prm *delete.Dele
 		}
 	}
 
-	ds := goqu.Delete(trgt).Where(goqu.C("id").Eq(id))
+	ds := goqu.Dialect(Name).Delete(trgt).Where(goqu.C("id").Eq(id))
 
 	// Convert the query to SQL, and arguments.
 	selectSQL, args, err := ds.ToSQL()
@@ -425,7 +425,7 @@ func (p *SQLite) Retrieve(ctx context.Context, id, target string, v any, prm *re
 	}
 
 	// Build the statement.
-	ds := goqu.From(trgt).Where(goqu.C("id").Eq(id))
+	ds := goqu.Dialect(Name).From(trgt).Where(goqu.C("id").Eq(id))
 
 	// Convert the query to SQL, and arguments.
 	selectSQL, args, err := ds.ToSQL()
@@ -658,7 +658,7 @@ func (p *SQLite) Create(ctx context.Context, id, target string, v any, prm *crea
 	}
 
 	// Build the statement.
-	ds := goqu.
+	ds := goqu.Dialect(Name).
 		Insert(trgt).
 		Rows(v).
 		Returning("id")
@@ -783,7 +783,7 @@ func (p *SQLite) Update(ctx context.Context, id, target string, v any, prm *upda
 	}
 
 	// Build the statement.
-	ds := goqu.Update(trgt).Set(v).Where(goqu.C("id").Eq(id))
+	ds := goqu.Dialect(Name).Update(trgt).Set(v).Where(goqu.C("id").Eq(id))
 
 	// Convert the query to SQL, and arguments.
 	updateSQL, args, err := ds.ToSQL()
