@@ -30,6 +30,9 @@ type Func[T any] func(o *Options[T]) error
 
 // Options for operations.
 type Options[T any] struct {
+	// Database name.
+	Database string `json:"database" validate:"required"`
+
 	// PreHookFunc is the function which runs before the operation.
 	PreHookFunc HookFunc[T] `json:"-"`
 
@@ -62,6 +65,15 @@ func WithPostHook[T any](fn HookFunc[T]) Func[T] {
 		}
 
 		o.PostHookFunc = fn
+
+		return nil
+	}
+}
+
+// WithDatabase sets the database name.
+func WithDatabase[T any](db string) Func[T] {
+	return func(o *Options[T]) error {
+		o.Database = db
 
 		return nil
 	}

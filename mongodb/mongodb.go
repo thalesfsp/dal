@@ -126,6 +126,9 @@ func (m *MongoDB) Count(ctx context.Context, target string, prm *count.Count, op
 		}
 	}
 
+	// Set the default database to what is set in the storage.
+	o.Database = m.Database
+
 	//////
 	// Params initialization.
 	//////
@@ -193,7 +196,7 @@ func (m *MongoDB) Count(ctx context.Context, target string, prm *count.Count, op
 
 	count, err := m.
 		Client.
-		Database(m.Database).
+		Database(o.Database).
 		Collection(trgt).
 		CountDocuments(ctx, filter)
 	if err != nil {
@@ -270,6 +273,9 @@ func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Del
 		}
 	}
 
+	// Set the default database to what is set in the storage.
+	o.Database = m.Database
+
 	//////
 	// Params initialization.
 	//////
@@ -304,7 +310,7 @@ func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Del
 
 	if _, err := m.
 		Client.
-		Database(m.Database).
+		Database(o.Database).
 		Collection(trgt).
 		DeleteOne(ctx, bson.M{"_id": id}); err != nil {
 		return customapm.TraceError(
@@ -383,6 +389,9 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 		}
 	}
 
+	// Set the default database to what is set in the storage.
+	o.Database = m.Database
+
 	//////
 	// Params initialization.
 	//////
@@ -419,7 +428,7 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 
 	if err := m.
 		Client.
-		Database(m.Database).
+		Database(o.Database).
 		Collection(trgt).
 		FindOne(ctx, bson.M{"_id": id}).
 		Decode(&result); err != nil {
@@ -522,6 +531,9 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 		}
 	}
 
+	// Set the default database to what is set in the storage.
+	o.Database = m.Database
+
 	//////
 	// Params initialization.
 	//////
@@ -604,7 +616,7 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 
 	cursor, err := m.
 		Client.
-		Database(m.Database).
+		Database(o.Database).
 		Collection(trgt).
 		Find(ctx, filter, cursorOpts)
 	if err != nil {
@@ -691,6 +703,9 @@ func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *cre
 		return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
 	}
 
+	// Set the default database to what is set in the storage.
+	o.Database = m.Database
+
 	// Iterate over the options and apply them against params.
 	for _, option := range options {
 		if err := option(o); err != nil {
@@ -732,7 +747,7 @@ func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *cre
 
 	if _, err := m.
 		Client.
-		Database(m.Database).
+		Database(o.Database).
 		Collection(trgt).
 		InsertOne(ctx, v); err != nil {
 		return "", customapm.TraceError(
@@ -808,6 +823,9 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 		}
 	}
 
+	// Set the default database to what is set in the storage.
+	o.Database = m.Database
+
 	//////
 	// Params initialization.
 	//////
@@ -856,7 +874,7 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 
 	if _, err := m.
 		Client.
-		Database(m.Database).
+		Database(o.Database).
 		Collection(trgt).
 		UpdateOne(ctx, bson.M{"_id": id}, update); err != nil {
 		return customapm.TraceError(

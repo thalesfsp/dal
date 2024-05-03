@@ -46,7 +46,7 @@ var singleton storage.IStorage
 // Config is the postgres configuration.
 type Config struct {
 	DataSourceName string `json:"dataSourceName" validate:"required"`
-	DriverName     string `json:"driverName" validate:"required"`
+	DriverName     string `json:"driverName"     validate:"required"`
 }
 
 // Postgres storage definition.
