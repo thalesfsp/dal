@@ -31,7 +31,7 @@ type Func[T any] func(o *Options[T]) error
 // Options for operations.
 type Options[T any] struct {
 	// Database name.
-	Database string `json:"database" validate:"required"`
+	Database string `json:"database"`
 
 	// PreHookFunc is the function which runs before the operation.
 	PreHookFunc HookFunc[T] `json:"-"`
