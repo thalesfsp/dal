@@ -119,15 +119,15 @@ func (m *MongoDB) Count(ctx context.Context, target string, prm *count.Count, op
 		return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
 	}
 
+	// Set the default database to what is set in the storage.
+	o.Database = m.Database
+
 	// Iterate over the options and apply them against params.
 	for _, option := range options {
 		if err := option(o); err != nil {
 			return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
 		}
 	}
-
-	// Set the default database to what is set in the storage.
-	o.Database = m.Database
 
 	//////
 	// Params initialization.
@@ -266,15 +266,15 @@ func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Del
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
 	}
 
+	// Set the default database to what is set in the storage.
+	o.Database = m.Database
+
 	// Iterate over the options and apply them against params.
 	for _, option := range options {
 		if err := option(o); err != nil {
 			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
 		}
 	}
-
-	// Set the default database to what is set in the storage.
-	o.Database = m.Database
 
 	//////
 	// Params initialization.
@@ -382,15 +382,15 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
 	}
 
+	// Set the default database to what is set in the storage.
+	o.Database = m.Database
+
 	// Iterate over the options and apply them against params.
 	for _, option := range options {
 		if err := option(o); err != nil {
 			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
 		}
 	}
-
-	// Set the default database to what is set in the storage.
-	o.Database = m.Database
 
 	//////
 	// Params initialization.
@@ -524,15 +524,15 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
 	}
 
+	// Set the default database to what is set in the storage.
+	o.Database = m.Database
+
 	// Iterate over the options and apply them against params.
 	for _, option := range opts {
 		if err := option(o); err != nil {
 			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
 		}
 	}
-
-	// Set the default database to what is set in the storage.
-	o.Database = m.Database
 
 	//////
 	// Params initialization.
@@ -816,15 +816,15 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
 	}
 
+	// Set the default database to what is set in the storage.
+	o.Database = m.Database
+
 	// Iterate over the options and apply them against params.
 	for _, option := range opts {
 		if err := option(o); err != nil {
 			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
 		}
 	}
-
-	// Set the default database to what is set in the storage.
-	o.Database = m.Database
 
 	//////
 	// Params initialization.
