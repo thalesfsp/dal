@@ -21,6 +21,8 @@ linters:
     - perfsprint
     - testifylint
     - wsl
+    - err113
+    - mnd
   fast: false
 
 # Settings for specific linters

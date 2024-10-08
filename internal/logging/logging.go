@@ -6,7 +6,9 @@ import (
 
 	"github.com/thalesfsp/sypl"
 	"github.com/thalesfsp/sypl/fields"
+	"github.com/thalesfsp/sypl/formatter"
 	"github.com/thalesfsp/sypl/level"
+	"github.com/thalesfsp/sypl/output"
 	"github.com/thalesfsp/sypl/processor"
 	"go.elastic.co/apm"
 )
@@ -40,16 +42,14 @@ func Get() *Logger {
 	once.Do(func() {
 		// Setup logger with default sane values. Default outputs: stdout, and
 		// stderr.
-		l := sypl.NewDefault("pubsub", level.Error)
-
-		//////
-		// Default outputs' processors.
-		//////
-
-		// Add the lower case processor to all outputs.
-		for _, o := range l.GetOutputs() {
-			o.AddProcessors(processor.ChangeFirstCharCase(processor.Lowercase))
-		}
+		l := sypl.New(
+			"dal",
+			output.Console(
+				level.Error,
+				processor.MuteBasedOnLevel(level.Fatal, level.Error),
+				processor.ChangeFirstCharCase(processor.Lowercase),
+			).SetFormatter(formatter.Text()),
+		)
 
 		//////
 		// Set singleton.
