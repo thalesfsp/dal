@@ -2,29 +2,21 @@ package metrics
 
 import (
 	"expvar"
-	"fmt"
 	"os"
-
-	"github.com/thalesfsp/dal/internal/logging"
+	"time"
 )
 
 // NewInt creates and initializes a new expvar.Int.
 func NewInt(name string) *expvar.Int {
-	prefix := os.Getenv("HTTPCLIENT_METRICS_PREFIX")
+	prefix := os.Getenv("DAL_METRICS_PREFIX")
 
-	if prefix == "" {
-		logging.Get().Warnln("HTTPCLIENT_METRICS_PREFIX is not set. Using default (httpclient).")
+	finalName := name + "--" + time.Now().Format(time.RFC3339)
 
-		prefix = "httpclient"
+	if prefix != "" {
+		finalName = prefix + "." + finalName
 	}
 
-	counter := expvar.NewInt(
-		fmt.Sprintf(
-			"%s.%s",
-			prefix,
-			name,
-		),
-	)
+	counter := expvar.NewInt(finalName)
 
 	counter.Set(0)
 
