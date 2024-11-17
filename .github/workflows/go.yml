@@ -71,12 +71,10 @@ jobs:
       - name: Check out repository code
         uses: actions/checkout@v3
         
-      - name: Setup Go environment
-        uses: actions/setup-go@v4.0.0
+      - name: Set up Go
+        uses: actions/setup-go@v3
         with:
-          # The Go version to download (if necessary) and use. Supports semver spec and ranges.
-          go-version: 1.20
-          cache: true
+          go-version: 1.23
 
       - name: Setup golangci-lint
         uses: golangci/golangci-lint-action@v6.1.0
