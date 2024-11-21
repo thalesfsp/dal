@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go v1.55.5
 	github.com/doug-martin/goqu/v9 v9.19.0
 	github.com/eapache/go-resiliency v1.7.0
-	github.com/elastic/go-elasticsearch/v8 v8.15.0
+	github.com/elastic/go-elasticsearch/v8 v8.16.0
 	github.com/google/uuid v1.6.0
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/lib/pq v1.10.9
@@ -20,7 +20,7 @@ require (
 	github.com/thalesfsp/customerror v1.2.9
 	github.com/thalesfsp/params v0.1.8
 	github.com/thalesfsp/status v1.0.18
-	github.com/thalesfsp/sypl v1.9.18
+	github.com/thalesfsp/sypl v1.9.19
 	github.com/thalesfsp/validation v0.0.3
 	go.elastic.co/apm v1.15.0
 	go.mongodb.org/mongo-driver v1.17.1
@@ -40,12 +40,12 @@ require (
 	github.com/elastic/go-windows v1.0.2 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/fatih/color v1.18.0 // indirect
-	github.com/gabriel-vasile/mimetype v1.4.6 // indirect
+	github.com/gabriel-vasile/mimetype v1.4.7 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
-	github.com/go-playground/validator/v10 v10.22.1 // indirect
+	github.com/go-playground/validator/v10 v10.23.0 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/jcchavezs/porto v0.7.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
