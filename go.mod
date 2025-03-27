@@ -18,7 +18,7 @@ require (
 	github.com/stretchr/testify v1.9.0
 	github.com/thalesfsp/concurrentloop v1.3.5
 	github.com/thalesfsp/customerror v1.2.9
-	github.com/thalesfsp/params v0.1.8
+	github.com/thalesfsp/params v0.1.15
 	github.com/thalesfsp/status v1.0.18
 	github.com/thalesfsp/sypl v1.9.19
 	github.com/thalesfsp/validation v0.0.3

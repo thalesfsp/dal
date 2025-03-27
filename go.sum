@@ -148,8 +148,8 @@ github.com/thalesfsp/configurer v1.3.22 h1:vyIqyKmii5m06FmTyuG1pIO/Wgthtb0+MUPZl
 github.com/thalesfsp/configurer v1.3.22/go.mod h1:jhTumstf/htFEYjQLTeUwKl2mHUexOfhzNvP+jKslJE=
 github.com/thalesfsp/customerror v1.2.9 h1:t6+56Z7MmjAJlo0q7IqDm5qM/eZ+qNrQQkT9TzXmi30=
 github.com/thalesfsp/customerror v1.2.9/go.mod h1:oKrHZbLQMLAMqpSuUNZPK9vejjKGsYIU+w7Knk4N/ME=
-github.com/thalesfsp/params v0.1.8 h1:gFdAbYidQ3VvWcs6MrRnaD8UMQ+PiafUq1u3rJj41+E=
-github.com/thalesfsp/params v0.1.8/go.mod h1:IlZEAsCHABTH32neauCD9m5Rb2QijrXRfnXP95X0ghU=
+github.com/thalesfsp/params v0.1.15 h1:K482i7bHqqdjnMHAtYq3zdxsFdL3pAJMHyei5ZsJjhc=
+github.com/thalesfsp/params v0.1.15/go.mod h1:WQiq33ASRQsSk8C4O+xKpXKB/VjD3cKe7PTVqip6OfI=
 github.com/thalesfsp/randomness v0.0.9 h1:RMyuxHtcARBdghmONa/zsAlyssJCqiEk6JS2fk7ewow=
 github.com/thalesfsp/randomness v0.0.9/go.mod h1:AoCaxwcwR0k4HGkJKPc9txG0si5VHsFRIx03N90uXmA=
 github.com/thalesfsp/status v1.0.18 h1:omyxzT8rsujxztMyS8G4eyIauU3I4FBMUSRrNpbbT5k=

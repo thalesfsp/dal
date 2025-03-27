@@ -280,6 +280,11 @@ func (es *ElasticSearch) Count(ctx context.Context, target string, prm *count.Co
 		Index: []string{trgt},
 	}
 
+	// Enables routing if specified.
+	if finalParam.Routing == nil {
+		req.Routing = finalParam.Routing
+	}
+
 	query, err := buildQuery(&list.List{
 		Search: finalParam.Search,
 	}, `"track_total_hits": true`)
@@ -418,7 +423,16 @@ func (es *ElasticSearch) Delete(ctx context.Context, id, target string, prm *del
 		}
 	}
 
-	res, err := es.Client.Delete(trgt, id, es.Client.Delete.WithContext(ctx))
+	reqOpts := []func(*esapi.DeleteRequest){
+		es.Client.Delete.WithContext(ctx),
+	}
+
+	// Enables routing if specified.
+	if finalParam.Routing != "" {
+		reqOpts = append(reqOpts, es.Client.Delete.WithRouting(finalParam.Routing))
+	}
+
+	res, err := es.Client.Delete(trgt, id, reqOpts...)
 	if err != nil {
 		return customapm.TraceError(
 			ctx,
@@ -530,7 +544,16 @@ func (es *ElasticSearch) Retrieve(ctx context.Context, id, target string, v any,
 		}
 	}
 
-	res, err := es.Client.Get(trgt, id, es.Client.Get.WithContext(ctx))
+	reqOpts := []func(*esapi.GetRequest){
+		es.Client.Get.WithContext(ctx),
+	}
+
+	// Enables routing if specified.
+	if finalParam.Routing != "" {
+		reqOpts = append(reqOpts, es.Client.Get.WithRouting(finalParam.Routing))
+	}
+
+	res, err := es.Client.Get(trgt, id, reqOpts...)
 	if err != nil {
 		return customapm.TraceError(
 			ctx,
@@ -661,6 +684,11 @@ func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *li
 	// Create a new search request.
 	req := esapi.SearchRequest{
 		Index: []string{trgt},
+	}
+
+	// Enables routing if specified.
+	if finalParam.Routing == nil {
+		req.Routing = finalParam.Routing
 	}
 
 	query, err := buildQuery(finalParam)
@@ -828,12 +856,17 @@ func (es *ElasticSearch) Create(ctx context.Context, id, target string, v any, p
 		return "", customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCreatedFailed())
 	}
 
-	res, err := es.Client.Index(
-		trgt,
-		bytes.NewReader(valueAsJSON),
+	reqOpts := []func(*esapi.IndexRequest){
 		es.Client.Index.WithDocumentID(id),
 		es.Client.Index.WithContext(ctx),
-	)
+	}
+
+	// Enables routing if specified.
+	if finalParam.Routing != "" {
+		reqOpts = append(reqOpts, es.Client.Index.WithRouting(finalParam.Routing))
+	}
+
+	res, err := es.Client.Index(trgt, bytes.NewReader(valueAsJSON), reqOpts...)
 	if err != nil {
 		return id, customapm.TraceError(
 			ctx,
@@ -951,12 +984,21 @@ func (es *ElasticSearch) Update(ctx context.Context, id, target string, v any, p
 		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterUpdatedFailed())
 	}
 
+	reqOpts := []func(*esapi.UpdateRequest){
+		es.Client.Update.WithContext(ctx),
+	}
+
+	// Enables routing if specified.
+	if finalParam.Routing != "" {
+		reqOpts = append(reqOpts, es.Client.Update.WithRouting(finalParam.Routing))
+	}
+
 	// Call client Update API using esapi.Update().
 	res, err := es.Client.Update(
 		trgt,
 		id,
 		bytes.NewReader([]byte(fmt.Sprintf(`{"doc":%s}`, valueAsJSON))),
-		es.Client.Update.WithRefresh("true"),
+		reqOpts...,
 	)
 	if err != nil {
 		return customapm.TraceError(
