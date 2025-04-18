@@ -618,6 +618,8 @@ func (es *ElasticSearch) Retrieve(ctx context.Context, id, target string, v any,
 // List data.
 //
 // NOTE: It uses param.List.Search to query the data.
+//
+//nolint:nestif,gocognit
 func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.
