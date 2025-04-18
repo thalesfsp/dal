@@ -726,6 +726,17 @@ func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *li
 		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterListedFailed())
 	}
 
+	// Extract the total count and associate it with prm.Total
+	if prm != nil {
+		if hits, ok := mapResp["hits"].(map[string]interface{}); ok {
+			if totalHits, ok := hits["total"].(map[string]interface{}); ok {
+				if value, ok := totalHits["value"].(float64); ok {
+					prm.Count = int64(value)
+				}
+			}
+		}
+	}
+
 	hits := []any{}
 
 	mapHits, ok := mapResp["hits"].(map[string]interface{})["hits"].([]interface{})
