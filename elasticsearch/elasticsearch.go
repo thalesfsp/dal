@@ -143,6 +143,14 @@ func buildQuery(params *list.List, addons ...string) (string, error) {
 		builder.WriteString(fmt.Sprintf(`, "size": %d`, params.Limit))
 	}
 
+	// Check if prm.Any is type of ListAny.
+	if lA, ok := params.Any.(*ListAny); ok {
+		// Append the track_total_hits query parameter, if any.
+		if lA.TrackTotalHits {
+			builder.WriteString(`, "track_total_hits": true`)
+		}
+	}
+
 	// Append any additional addons.
 	if len(addons) > 0 {
 		builder.WriteString(", ")

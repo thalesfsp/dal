@@ -41,3 +41,10 @@ type CountResponse struct {
 		Hits     []any `json:"hits"`
 	} `json:"hits"`
 }
+
+// ListAny is a struct for the `list.List` `Any` field.
+type ListAny struct {
+	// TrackTotalHits indicates whether Elasticsearch should track the true
+	// total number of hits.
+	TrackTotalHits bool `json:"track_total_hits" default:"false" query:"track_total_hits"`
+}

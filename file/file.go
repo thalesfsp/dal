@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/internal/customapm"
@@ -537,6 +538,30 @@ func (s *File) Create(ctx context.Context, id, target string, v any, prm *create
 	for _, option := range options {
 		if err := option(o); err != nil {
 			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+		}
+	}
+
+	// Check if prm.Any is type of CreateAny.
+	if cA, ok := prm.Any.(*CreateAny); ok {
+		if cA.CreateIfNotExist {
+			// Extract directory from target which contains the full file path.
+			dir := filepath.Dir(target)
+
+			// Check if the directory exists.
+			if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+				// Create the directory if it doesn't exist.
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+				}
+			}
+
+			// Check if the file already exists.
+			if _, err := os.Stat(target); errors.Is(err, fs.ErrNotExist) {
+				// Create the file if it doesn't exist.
+				if _, err := os.Create(target); err != nil {
+					return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+				}
+			}
 		}
 	}
 
