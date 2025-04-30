@@ -936,7 +936,7 @@ func New(ctx context.Context, bucket string, cfg *Config) (*S3, error) {
 // Exported functionalities.
 //////
 
-// Get returns a setup MongoDB, or set it up.
+// Get returns a setup storage, or set it up.
 func Get() storage.IStorage {
 	if singleton == nil {
 		panic(fmt.Sprintf("%s %s not %s", Name, storage.Type, status.Initialized))

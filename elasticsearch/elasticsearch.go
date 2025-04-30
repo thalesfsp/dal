@@ -295,7 +295,10 @@ func (es *ElasticSearch) Count(ctx context.Context, target string, prm *count.Co
 
 	query, err := buildQuery(&list.List{
 		Search: finalParam.Search,
-	}, `"track_total_hits": true`)
+		Any: ListAny{
+			TrackTotalHits: true,
+		},
+	})
 	if err != nil {
 		return 0, customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCountedFailed())
 	}
@@ -304,7 +307,7 @@ func (es *ElasticSearch) Count(ctx context.Context, target string, prm *count.Co
 	req.Body = strings.NewReader(query)
 
 	// Execute the search request.
-	res, err := req.Do(context.Background(), es.Client)
+	res, err := req.Do(ctx, es.Client)
 	if err != nil {
 		return 0, customapm.TraceError(
 			ctx,
@@ -710,7 +713,7 @@ func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *li
 	req.Body = strings.NewReader(query)
 
 	// Execute the search request.
-	res, err := req.Do(context.Background(), es.Client)
+	res, err := req.Do(ctx, es.Client)
 	if err != nil {
 		return customapm.TraceError(
 			ctx,
@@ -1182,7 +1185,7 @@ func NewWithDynamicIndex(
 // Exported functionalities.
 //////
 
-// Get returns a setup MongoDB, or set it up.
+// Get returns a setup storage, or set it up.
 func Get() storage.IStorage {
 	if singleton == nil {
 		panic(fmt.Sprintf("%s %s not %s", Name, storage.Type, status.Initialized))
@@ -1194,4 +1197,79 @@ func Get() storage.IStorage {
 // Set sets the storage, primarily used for testing.
 func Set(s storage.IStorage) {
 	singleton = s
+}
+
+// Query executes a search query against the ElasticSearch storage.
+func Query(
+	ctx context.Context,
+	s storage.IStorage,
+	index string,
+	query string,
+	v any,
+) error {
+	// Cast the storage to ElasticSearch.
+	esClient, ok := s.GetClient().(*elasticsearch.Client)
+	if !ok {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewFailedToError("cast storage to elasticsearch.Client"),
+			s.GetLogger(),
+			s.GetCounterListedFailed(),
+		)
+	}
+
+	// Execute the search query.
+	res, err := esClient.Search(
+		esClient.Search.WithContext(ctx),
+		esClient.Search.WithIndex(index),
+		esClient.Search.WithBody(strings.NewReader(query)),
+	)
+	if err != nil {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewFailedToError("failed to execute search query", customerror.WithError(err)),
+			s.GetLogger(),
+			s.GetCounterListedFailed(),
+		)
+	}
+
+	defer res.Body.Close()
+
+	if err := checkResponseIsError(res); err != nil {
+		return customapm.TraceError(
+			ctx,
+			customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed()),
+			s.GetLogger(),
+			s.GetCounterListedFailed(),
+		)
+	}
+
+	// Parse the response body into `v`.
+	if err := shared.Decode(res.Body, v); err != nil {
+		return customapm.TraceError(
+			ctx,
+			err,
+			s.GetLogger(),
+			s.GetCounterListedFailed(),
+		)
+	}
+
+	//////
+	// Logging
+	//////
+
+	// Correlates the transaction, span and log, and logs it.
+	s.GetLogger().PrintlnWithOptions(
+		level.Debug,
+		status.Listed.String(),
+		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
+	)
+
+	//////
+	// Metrics.
+	//////
+
+	s.GetCounterListed().Add(1)
+
+	return nil
 }
