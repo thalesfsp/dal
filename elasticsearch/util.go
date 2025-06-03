@@ -5,7 +5,7 @@ import (
 
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"github.com/thalesfsp/customerror"
-	"github.com/thalesfsp/dal/internal/shared"
+	"github.com/thalesfsp/dal/v2/internal/shared"
 )
 
 // Parse ES response body.

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"expvar"
 
-	"github.com/thalesfsp/dal/internal/logging"
+	"github.com/thalesfsp/dal/v2/internal/logging"
 	"github.com/thalesfsp/sypl"
 	"github.com/thalesfsp/sypl/fields"
 	"github.com/thalesfsp/sypl/level"

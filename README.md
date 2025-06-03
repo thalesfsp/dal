@@ -19,7 +19,7 @@ This package implements a generic storage interface that abstracts away the comp
 
 ## Install
 
-`go get github.com/thalesfsp/dal/storage`
+`go get github.com/thalesfsp/dal/v2/storage`
 
 ## Contributing
 

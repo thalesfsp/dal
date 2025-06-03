@@ -1,4 +1,4 @@
-module github.com/thalesfsp/dal
+module github.com/thalesfsp/dal/v2
 
 go 1.23.0
 

@@ -1,7 +1,7 @@
 package storage
 
 import (
-	"github.com/thalesfsp/dal/internal/shared"
+	"github.com/thalesfsp/dal/v2/internal/shared"
 )
 
 // ParseToStruct parses the given JSON (`from`) to struct (`to`).

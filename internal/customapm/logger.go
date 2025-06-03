@@ -3,7 +3,7 @@ package customapm
 import (
 	"fmt"
 
-	"github.com/thalesfsp/dal/internal/logging"
+	"github.com/thalesfsp/dal/v2/internal/logging"
 	"github.com/thalesfsp/sypl"
 	"github.com/thalesfsp/sypl/level"
 	"github.com/thalesfsp/validation"
