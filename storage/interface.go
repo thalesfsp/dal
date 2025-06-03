@@ -4,12 +4,12 @@ import (
 	"context"
 	"expvar"
 
-	"github.com/thalesfsp/params/count"
-	"github.com/thalesfsp/params/create"
-	"github.com/thalesfsp/params/delete"
-	"github.com/thalesfsp/params/list"
-	"github.com/thalesfsp/params/retrieve"
-	"github.com/thalesfsp/params/update"
+	"github.com/thalesfsp/params/v2/count"
+	"github.com/thalesfsp/params/v2/create"
+	"github.com/thalesfsp/params/v2/delete"
+	"github.com/thalesfsp/params/v2/list"
+	"github.com/thalesfsp/params/v2/retrieve"
+	"github.com/thalesfsp/params/v2/update"
 	"github.com/thalesfsp/sypl"
 )
 

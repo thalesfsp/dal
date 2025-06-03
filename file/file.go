@@ -13,12 +13,12 @@ import (
 	"github.com/thalesfsp/dal/internal/logging"
 	"github.com/thalesfsp/dal/internal/shared"
 	"github.com/thalesfsp/dal/storage"
-	"github.com/thalesfsp/params/count"
-	"github.com/thalesfsp/params/create"
-	"github.com/thalesfsp/params/delete"
-	"github.com/thalesfsp/params/list"
-	"github.com/thalesfsp/params/retrieve"
-	"github.com/thalesfsp/params/update"
+	"github.com/thalesfsp/params/v2/count"
+	"github.com/thalesfsp/params/v2/create"
+	"github.com/thalesfsp/params/v2/delete"
+	"github.com/thalesfsp/params/v2/list"
+	"github.com/thalesfsp/params/v2/retrieve"
+	"github.com/thalesfsp/params/v2/update"
 	"github.com/thalesfsp/status"
 	"github.com/thalesfsp/sypl"
 	"github.com/thalesfsp/sypl/fields"
@@ -512,6 +512,8 @@ func (s *File) List(ctx context.Context, target string, v any, prm *list.List, o
 //
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
+//
+//nolint:nestif,gocognit
 func (s *File) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
 	//////
 	// APM Tracing.
@@ -550,7 +552,7 @@ func (s *File) Create(ctx context.Context, id, target string, v any, prm *create
 			// Check if the directory exists.
 			if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
 				// Create the directory if it doesn't exist.
-				if err := os.MkdirAll(dir, 0755); err != nil {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
 					return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 				}
 			}

@@ -46,5 +46,5 @@ type CountResponse struct {
 type ListAny struct {
 	// TrackTotalHits indicates whether Elasticsearch should track the true
 	// total number of hits.
-	TrackTotalHits bool `json:"track_total_hits" default:"false" query:"track_total_hits"`
+	TrackTotalHits bool `default:"false" json:"track_total_hits" query:"track_total_hits"`
 }

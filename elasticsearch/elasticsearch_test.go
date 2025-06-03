@@ -9,22 +9,20 @@ import (
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/thalesfsp/dal/internal/shared"
-	"github.com/thalesfsp/params/count"
-	"github.com/thalesfsp/params/create"
-	"github.com/thalesfsp/params/customsort"
-	"github.com/thalesfsp/params/delete"
-	"github.com/thalesfsp/params/list"
-	"github.com/thalesfsp/params/retrieve"
-	"github.com/thalesfsp/params/update"
+	"github.com/thalesfsp/params/v2/count"
+	"github.com/thalesfsp/params/v2/create"
+	"github.com/thalesfsp/params/v2/customsort"
+	"github.com/thalesfsp/params/v2/delete"
+	"github.com/thalesfsp/params/v2/list"
+	"github.com/thalesfsp/params/v2/retrieve"
+	"github.com/thalesfsp/params/v2/update"
 )
 
 var listParam = &list.List{
 	Limit:  10,
 	Fields: []string{"id", "name", "version"},
 	Offset: 0,
-	Sort: customsort.SortMap{
-		"id": customsort.Asc,
-	},
+	Sort:   [][]string{{"id", customsort.Asc}},
 	Search: `{"match_all" : {} }`,
 }
 
@@ -264,4 +262,10 @@ func Test_buildQuery(t *testing.T) {
 			assert.JSONEq(t, tt.want, got)
 		})
 	}
+}
+
+func TestToElasticSearchString(t *testing.T) {
+	got, err := ToElasticSearchString([][]string{{"b", "desc"}, {"a", "asc"}})
+	assert.NoError(t, err)
+	assert.Equal(t, `[{"b": {"order": "desc"}},{"a": {"order": "asc"}}]`, got)
 }

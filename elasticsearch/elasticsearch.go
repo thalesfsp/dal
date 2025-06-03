@@ -16,13 +16,13 @@ import (
 	"github.com/thalesfsp/dal/internal/logging"
 	"github.com/thalesfsp/dal/internal/shared"
 	"github.com/thalesfsp/dal/storage"
-	"github.com/thalesfsp/params/count"
-	"github.com/thalesfsp/params/create"
-	"github.com/thalesfsp/params/customsort"
-	"github.com/thalesfsp/params/delete"
-	"github.com/thalesfsp/params/list"
-	"github.com/thalesfsp/params/retrieve"
-	"github.com/thalesfsp/params/update"
+	"github.com/thalesfsp/params/v2/count"
+	"github.com/thalesfsp/params/v2/create"
+	"github.com/thalesfsp/params/v2/customsort"
+	"github.com/thalesfsp/params/v2/delete"
+	"github.com/thalesfsp/params/v2/list"
+	"github.com/thalesfsp/params/v2/retrieve"
+	"github.com/thalesfsp/params/v2/update"
 	"github.com/thalesfsp/status"
 	"github.com/thalesfsp/sypl"
 	"github.com/thalesfsp/sypl/fields"
@@ -71,16 +71,16 @@ type ElasticSearch struct {
 // Helpers.
 //////
 
-// ToElasticSearchString converts the `Sort` to ElasticSearch sort format.
-func ToElasticSearchString(s customsort.Sort) (string, error) {
-	sortMap, err := s.ToMap()
-	if err != nil {
-		return "", err
-	}
+// ToElasticSearchString converts the `SortSlice` to ElasticSearch sort format.
+func ToElasticSearchString(s customsort.SortSlice) (string, error) {
+	sortFields := make([]string, 0, len(s))
 
-	sortFields := make([]string, 0, len(sortMap))
+	for _, pair := range s {
+		if len(pair) != 2 {
+			continue
+		}
 
-	for fieldName, sortOrder := range sortMap {
+		fieldName, sortOrder := pair[0], pair[1]
 		sortFields = append(sortFields, `{"`+fieldName+`": {"order": "`+sortOrder+`"}}`)
 	}
 
@@ -123,7 +123,7 @@ func buildQuery(params *list.List, addons ...string) (string, error) {
 
 	// Append the sort query parameter, if any.
 	if params.Sort != nil {
-		sort, err := ToElasticSearchString(params.Sort.ToSort())
+		sort, err := ToElasticSearchString(params.Sort)
 		if err != nil {
 			return "", err
 		}

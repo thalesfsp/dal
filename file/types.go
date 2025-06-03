@@ -8,5 +8,5 @@ type ResponseListKeys struct {
 // CreateAny is a struct for the `create.Create` `Any` field.
 type CreateAny struct {
 	// Create directory and file if it does not exist.
-	CreateIfNotExist bool `json:"create_if_not_exist" default:"true"`
+	CreateIfNotExist bool `default:"true" json:"create_if_not_exist"`
 }
