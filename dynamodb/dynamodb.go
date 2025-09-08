@@ -3,6 +3,7 @@ package dynamodb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -30,6 +31,8 @@ import (
 	"github.com/thalesfsp/sypl/fields"
 	"github.com/thalesfsp/sypl/level"
 	"github.com/thalesfsp/validation"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 //////
@@ -42,6 +45,10 @@ const Name = "dynamodb"
 // Singleton.
 var singleton storage.IStorage
 
+// DynamicTableFunc is a function which defines the name of the table, and
+// evaluated at the operation time.
+type DynamicTableFunc func() string
+
 // Config is the DynamoDB configuration.
 type Config = aws.Config
 
@@ -53,7 +60,7 @@ type DynamoDB struct {
 	Client *dynamodb.DynamoDB `json:"-" validate:"required"`
 
 	// Config is the DynamoDB configuration.
-	Config *Config `json:"-"`
+	Config Config `json:"-"`
 
 	// Region is the AWS region.
 	Region string `json:"region" validate:"required"`
@@ -61,9 +68,9 @@ type DynamoDB struct {
 	// Target allows to set a static target. If it is empty, the target will be
 	// dynamic - the one set at the operation (count, create, delete, etc) time.
 	// Depending on the storage, target is a collection, a table, a bucket, etc.
-	// For DynamoDB, the target is the table name. This is optional and serves
-	// as a fallback when no target is provided at operation time.
-	Target string `json:"-" validate:"omitempty,gt=0"`
+	// For DynamoDB, the target is the table name. This function allows for
+	// dynamic table naming, useful for time-based partitioning or other patterns.
+	Target DynamicTableFunc `json:"-"`
 
 	// PrimaryKey is the primary key field name for DynamoDB.
 	// Default is "id" if not specified.
@@ -143,7 +150,7 @@ func (d *DynamoDB) Count(ctx context.Context, target string, prm *count.Count, o
 	// Target definition.
 	//////
 
-	trgt, err := shared.TargetName(target, d.Target)
+	trgt, err := shared.TargetName(target, d.Target())
 	if err != nil {
 		return 0, customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCountedFailed())
 	}
@@ -301,7 +308,7 @@ func (d *DynamoDB) Delete(ctx context.Context, id, target string, prm *delete.De
 	// Target definition.
 	//////
 
-	trgt, err := shared.TargetName(target, d.Target)
+	trgt, err := shared.TargetName(target, d.Target())
 	if err != nil {
 		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterDeletedFailed())
 	}
@@ -427,7 +434,7 @@ func (d *DynamoDB) Retrieve(ctx context.Context, id, target string, v any, prm *
 	// Target definition.
 	//////
 
-	trgt, err := shared.TargetName(target, d.Target)
+	trgt, err := shared.TargetName(target, d.Target())
 	if err != nil {
 		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterRetrievedFailed())
 	}
@@ -517,6 +524,8 @@ func (d *DynamoDB) Retrieve(ctx context.Context, id, target string, v any, prm *
 // List data.
 //
 // NOTE: It uses param.List.Any for DynamoDB filter expressions.
+//
+//nolint:gocognit,cyclop,funlen,gocyclo,maintidx
 func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.List, opts ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.
@@ -563,7 +572,7 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 	// Target definition.
 	//////
 
-	trgt, err := shared.TargetName(target, d.Target)
+	trgt, err := shared.TargetName(target, d.Target())
 	if err != nil {
 		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterListedFailed())
 	}
@@ -665,6 +674,7 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 		for _, item := range result.Items {
 			if currentOffset < targetOffset {
 				currentOffset++
+
 				continue
 			}
 
@@ -726,6 +736,8 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 // Create data.
 //
 // NOTE: DynamoDB requires the primary key to be set in the model (`v`).
+//
+//nolint:gocognit,nestif
 func (d *DynamoDB) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
 	if id == "" {
 		return "", customapm.TraceError(
@@ -781,7 +793,7 @@ func (d *DynamoDB) Create(ctx context.Context, id, target string, v any, prm *cr
 	// Target definition.
 	//////
 
-	trgt, err := shared.TargetName(target, d.Target)
+	trgt, err := shared.TargetName(target, d.Target())
 	if err != nil {
 		return "", customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCreatedFailed())
 	}
@@ -804,7 +816,7 @@ func (d *DynamoDB) Create(ctx context.Context, id, target string, v any, prm *cr
 
 	if val.Kind() == reflect.Struct {
 		// Find the primary key field and set it
-		for i := 0; i < val.NumField(); i++ {
+		for i := range val.NumField() {
 			field := val.Type().Field(i)
 
 			// Check various tag formats for the primary key
@@ -819,14 +831,14 @@ func (d *DynamoDB) Create(ctx context.Context, id, target string, v any, prm *cr
 				dynamoTag = strings.Split(dynamoTag, ",")[0]
 			}
 
-			if field.Name == strings.Title(d.PrimaryKey) ||
+			if field.Name == cases.Title(language.English).String(d.PrimaryKey) ||
 				jsonTag == d.PrimaryKey ||
 				dynamoTag == d.PrimaryKey ||
 				strings.EqualFold(field.Name, d.PrimaryKey) {
-
 				if val.Field(i).CanSet() && val.Field(i).Kind() == reflect.String {
 					val.Field(i).SetString(id)
 				}
+
 				break
 			}
 		}
@@ -938,7 +950,7 @@ func (d *DynamoDB) Update(ctx context.Context, id, target string, v any, prm *up
 	// Target definition.
 	//////
 
-	trgt, err := shared.TargetName(target, d.Target)
+	trgt, err := shared.TargetName(target, d.Target())
 	if err != nil {
 		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterUpdatedFailed())
 	}
@@ -965,7 +977,7 @@ func (d *DynamoDB) Update(ctx context.Context, id, target string, v any, prm *up
 	}
 
 	// Build update expression
-	var updateExpressions []string
+	updateExpressions := make([]string, 0, len(item))
 	expressionAttributeNames := make(map[string]*string)
 	expressionAttributeValues := make(map[string]*dynamodb.AttributeValue)
 
@@ -1057,7 +1069,18 @@ func (d *DynamoDB) GetClient() any {
 //////
 
 // New creates a new DynamoDB storage.
-func New(ctx context.Context, region string, cfg *Config, opts ...func(*DynamoDB)) (*DynamoDB, error) {
+func New(ctx context.Context, region string, cfg *Config) (*DynamoDB, error) {
+	return NewWithTable(ctx, region, "", cfg)
+}
+
+// NewWithTable creates a new DynamoDB storage with a static table name.
+func NewWithTable(ctx context.Context, region, tableName string, cfg *Config) (*DynamoDB, error) {
+	return NewWithDynamicTable(ctx, region, func() string { return tableName }, cfg)
+}
+
+// NewWithDynamicTable creates a new DynamoDB storage with a dynamic table function.
+// This allows for table names to be computed at runtime, useful for time-based partitioning.
+func NewWithDynamicTable(ctx context.Context, region string, dynamicTableFunc DynamicTableFunc, cfg *Config) (*DynamoDB, error) {
 	// Enforces IStorage interface implementation.
 	var _ storage.IStorage = (*DynamoDB)(nil)
 
@@ -1080,7 +1103,9 @@ func New(ctx context.Context, region string, cfg *Config, opts ...func(*DynamoDB
 	}
 
 	// Apply custom config if provided
+	var finalConfig Config
 	if cfg != nil {
+		finalConfig = *cfg
 		sess, err = session.NewSession(cfg)
 		if err != nil {
 			return nil, customapm.TraceError(
@@ -1103,14 +1128,15 @@ func New(ctx context.Context, region string, cfg *Config, opts ...func(*DynamoDB
 		_, err := client.ListTablesWithContext(ctx, &dynamodb.ListTablesInput{
 			Limit: aws.Int64(1),
 		})
-
 		if err != nil {
-			if awsErr, ok := err.(awserr.Error); ok {
+			var awsErr awserr.Error
+			if errors.As(err, &awsErr) {
 				// Check if it's a temporary error
 				if awsErr.Code() == "RequestLimitExceeded" || awsErr.Code() == "ServiceUnavailable" {
 					return err // Retryable
 				}
 			}
+
 			return err
 		}
 
@@ -1128,14 +1154,10 @@ func New(ctx context.Context, region string, cfg *Config, opts ...func(*DynamoDB
 		Storage: s,
 
 		Client:     client,
-		Config:     cfg,
+		Config:     finalConfig,
 		Region:     region,
 		PrimaryKey: "id", // Default primary key
-	}
-
-	// Apply functional options
-	for _, opt := range opts {
-		opt(storage)
+		Target:     dynamicTableFunc,
 	}
 
 	if err := validation.Validate(storage); err != nil {
@@ -1179,5 +1201,19 @@ func Set(s storage.IStorage) {
 func WithPrimaryKey(primaryKey string) func(*DynamoDB) {
 	return func(d *DynamoDB) {
 		d.PrimaryKey = primaryKey
+	}
+}
+
+// WithTarget sets a static target (table name) for the DynamoDB storage.
+func WithTarget(target string) func(*DynamoDB) {
+	return func(d *DynamoDB) {
+		d.Target = func() string { return target }
+	}
+}
+
+// WithDynamicTarget sets a dynamic target function for the DynamoDB storage.
+func WithDynamicTarget(targetFunc DynamicTableFunc) func(*DynamoDB) {
+	return func(d *DynamoDB) {
+		d.Target = targetFunc
 	}
 }

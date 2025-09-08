@@ -1,7 +1,9 @@
 package dynamodb
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -21,13 +23,14 @@ func IsNotFoundError(err error) bool {
 	}
 
 	// Check for AWS specific error
-	if awsErr, ok := err.(awserr.Error); ok {
+	var awsErr awserr.Error
+	if errors.As(err, &awsErr) {
 		return awsErr.Code() == dynamodb.ErrCodeResourceNotFoundException
 	}
 
 	// Check if it's a customerror not found type
 	if customErr, ok := customerror.To(err); ok {
-		return customErr.StatusCode == 404
+		return customErr.StatusCode == http.StatusNotFound
 	}
 
 	return false
@@ -35,17 +38,21 @@ func IsNotFoundError(err error) bool {
 
 // IsConditionalCheckFailedError checks if the error is a conditional check failed error.
 func IsConditionalCheckFailedError(err error) bool {
-	if awsErr, ok := err.(awserr.Error); ok {
+	var awsErr awserr.Error
+	if errors.As(err, &awsErr) {
 		return awsErr.Code() == dynamodb.ErrCodeConditionalCheckFailedException
 	}
+
 	return false
 }
 
 // IsProvisionedThroughputExceededError checks if the error is a throughput exceeded error.
 func IsProvisionedThroughputExceededError(err error) bool {
-	if awsErr, ok := err.(awserr.Error); ok {
+	var awsErr awserr.Error
+	if errors.As(err, &awsErr) {
 		return awsErr.Code() == dynamodb.ErrCodeProvisionedThroughputExceededException
 	}
+
 	return false
 }
 
@@ -60,7 +67,7 @@ func BuildFilterExpression(conditions map[string]interface{}) (
 		return nil, nil, nil, nil
 	}
 
-	var expressions []string
+	expressions := make([]string, 0, len(conditions))
 	attributeNames := make(map[string]*string)
 	attributeValues := make(map[string]*dynamodb.AttributeValue)
 
@@ -101,7 +108,7 @@ func BuildUpdateExpression(updates map[string]interface{}, primaryKey string) (
 		return nil, nil, nil, fmt.Errorf("no fields to update")
 	}
 
-	var setExpressions []string
+	setExpressions := make([]string, 0, len(updates))
 	attributeNames := make(map[string]*string)
 	attributeValues := make(map[string]*dynamodb.AttributeValue)
 
@@ -143,7 +150,7 @@ func BuildProjectionExpression(fields []string) (*string, map[string]*string) {
 	}
 
 	attributeNames := make(map[string]*string)
-	var projections []string
+	projections := make([]string, 0, len(fields))
 
 	for _, field := range fields {
 		attrName := fmt.Sprintf("#%s", field)
@@ -151,7 +158,7 @@ func BuildProjectionExpression(fields []string) (*string, map[string]*string) {
 		attributeNames[attrName] = aws.String(field)
 	}
 
-	expression := fmt.Sprintf("%s", projections[0])
+	expression := projections[0]
 	for i := 1; i < len(projections); i++ {
 		expression = fmt.Sprintf("%s, %s", expression, projections[i])
 	}
