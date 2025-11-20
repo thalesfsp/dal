@@ -1,8 +1,6 @@
 module github.com/thalesfsp/dal/v2
 
-go 1.23.0
-
-toolchain go1.23.1
+go 1.24.0
 
 require (
 	github.com/aws/aws-sdk-go v1.55.7
@@ -24,7 +22,8 @@ require (
 	github.com/thalesfsp/validation v0.0.3
 	go.elastic.co/apm v1.15.0
 	go.mongodb.org/mongo-driver v1.17.3
-	golang.org/x/crypto v0.38.0
+	golang.org/x/crypto v0.45.0
+	golang.org/x/text v0.31.0
 )
 
 require (
@@ -72,12 +71,12 @@ require (
 	go.opentelemetry.io/otel/metric v1.36.0 // indirect
 	go.opentelemetry.io/otel/trace v1.36.0 // indirect
 	golang.org/x/lint v0.0.0-20241112194109-818c5a804067 // indirect
-	golang.org/x/mod v0.24.0 // indirect
-	golang.org/x/net v0.40.0 // indirect
-	golang.org/x/sync v0.14.0 // indirect
-	golang.org/x/sys v0.33.0 // indirect
-	golang.org/x/text v0.25.0 // indirect
-	golang.org/x/tools v0.33.0 // indirect
+	golang.org/x/mod v0.29.0 // indirect
+	golang.org/x/net v0.47.0 // indirect
+	golang.org/x/sync v0.18.0 // indirect
+	golang.org/x/sys v0.38.0 // indirect
+	golang.org/x/telemetry v0.0.0-20251008203120-078029d740a8 // indirect
+	golang.org/x/tools v0.38.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	howett.net/plist v1.0.1 // indirect
