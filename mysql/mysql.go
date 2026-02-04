@@ -9,14 +9,13 @@ import (
 	"strconv"
 	"strings"
 
-	// Import the mysql driver.
-	_ "github.com/go-sql-driver/mysql"
-
+	"github.com/doug-martin/goqu/v9"
 	// Import the mysql dialect for goqu.
 	_ "github.com/doug-martin/goqu/v9/dialect/mysql"
-
-	"github.com/doug-martin/goqu/v9"
 	"github.com/eapache/go-resiliency/retrier"
+
+	// Import the mysql driver.
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v2/internal/customapm"
