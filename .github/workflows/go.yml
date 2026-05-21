@@ -55,7 +55,13 @@ jobs:
       #   command: foo:pass:::upload
 
       elasticsearch:
-        image: docker.elastic.co/elasticsearch/elasticsearch:8.4.3
+        # Bumped from 8.4.3 because the JDK bundled with 8.4.3 crashes on
+        # ubuntu-latest GitHub runners (Ubuntu 24.04) with
+        # `CgroupV2Subsystem.getInstance` NPE — the cgroup v2 mount layout
+        # changed in newer kernels and the older JDK can't read it. 8.15.x
+        # ships a fixed JDK. Cluster-side compatibility is unaffected:
+        # go-elasticsearch v8 client works against any v8.x server.
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
         env:
           discovery.type: single-node
           ES_JAVA_OPTS: -Xms512m -Xmx512m
