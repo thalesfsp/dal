@@ -6,8 +6,20 @@ type ResponseSourceFromES struct {
 }
 
 // ResponseErrorFromESReason is the reason from the Elasticsearch response.
+//
+// Elasticsearch's error envelope can carry chained causation via `caused_by`
+// (recursive) and `root_cause` (array of leaf causes). Before v2.1.1 only the
+// top-level `reason` was surfaced, which for `search_phase_execution_exception`
+// is a meaningless "all shards failed" string while the actionable detail
+// lives in `caused_by.reason` (e.g. "Result window is too large..."). Both
+// chains are now captured so callers — directly via the typed fields or
+// indirectly via the enriched `ResponseError.Reason` string — can see the
+// real cause.
 type ResponseErrorFromESReason struct {
-	Reason string `json:"reason"`
+	Type      string                       `json:"type,omitempty"`
+	Reason    string                       `json:"reason"`
+	CausedBy  *ResponseErrorFromESReason   `json:"caused_by,omitempty"`
+	RootCause []ResponseErrorFromESReason  `json:"root_cause,omitempty"`
 }
 
 // ResponseErrorFromES is the error from the Elasticsearch response.
