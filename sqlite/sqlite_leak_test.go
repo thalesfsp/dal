@@ -29,9 +29,9 @@ import (
 // value `New`'s driverName seam is pointed at for the duration of a test.
 const leakDriverName = "sqlite-leak-counting"
 
-// pingErr is returned by the counting connection's Ping so the retrier in `New`
+// errPing is returned by the counting connection's Ping so the retrier in `New`
 // exhausts and `New` takes its ping-failure error return path.
-var pingErr = errors.New("counting driver: ping always fails")
+var errPing = errors.New("counting driver: ping always fails")
 
 // connCounter tracks opened vs closed physical connections for the counting
 // driver so a test can assert the opened handle was closed (not leaked).
@@ -60,7 +60,7 @@ type countingConn struct {
 }
 
 // Ping always fails, forcing `New`'s retrier to give up and return an error.
-func (c *countingConn) Ping(_ context.Context) error { return pingErr }
+func (c *countingConn) Ping(_ context.Context) error { return errPing }
 
 // Close records the close exactly once (guards against database/sql calling
 // Close more than once for the same physical connection).
