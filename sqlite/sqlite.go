@@ -43,6 +43,13 @@ const Name = "sqlite3"
 // Singleton.
 var singleton storage.IStorage
 
+// driverName is the database/sql driver `New` opens the client with. It
+// defaults to `Name` and exists as a test seam so the constructor's post-open
+// error paths (which must close the client to avoid leaking the pool) can be
+// exercised against an injected, controllable driver. Production never changes
+// it.
+var driverName = Name
+
 // Config is the postgres configuration.
 type Config struct {
 	DataSourceName string `json:"dataSourceName" validate:"required"`
@@ -845,7 +852,7 @@ func New(ctx context.Context, dataSource string) (*SQLite, error) {
 	}
 
 	cfg := &Config{
-		DriverName:     Name,
+		DriverName:     driverName,
 		DataSourceName: dataSource,
 	}
 
@@ -858,6 +865,18 @@ func New(ctx context.Context, dataSource string) (*SQLite, error) {
 			s.GetCounterPingFailed(),
 		)
 	}
+
+	// The client is open but not yet handed to the caller. Close it on every
+	// error path below (ping failure, validation failure, or any future one)
+	// so the underlying connection pool is never leaked. `success` flips true
+	// only once the fully-built storage is about to be returned.
+	success := false
+
+	defer func() {
+		if !success {
+			_ = client.Close()
+		}
+	}()
 
 	r := retrier.New(retrier.ExponentialBackoff(3, shared.TimeoutPing), nil)
 
@@ -891,6 +910,8 @@ func New(ctx context.Context, dataSource string) (*SQLite, error) {
 	}
 
 	singleton = storage
+
+	success = true
 
 	return storage, nil
 }
