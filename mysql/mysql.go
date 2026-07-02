@@ -183,18 +183,15 @@ func (m *MySQL) Count(ctx context.Context, target string, prm *count.Count, opti
 		return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
 	}
 
-	defaultSearch := "SELECT COUNT(*) FROM " + trgt
-
-	if finalParam.Search == "" {
-		finalParam.Search = defaultSearch
+	// Honor a caller-provided Search; only default when none was supplied.
+	// Copy prm so defaulting never mutates the caller-owned params struct.
+	if prm != nil {
+		prmCopy := *prm
+		finalParam = &prmCopy
 	}
 
-	if prm != nil {
-		if prm.Search != "" {
-			prm.Search = defaultSearch
-		}
-
-		finalParam = prm
+	if finalParam.Search == "" {
+		finalParam.Search = "SELECT COUNT(*) FROM " + trgt
 	}
 
 	//////
@@ -542,18 +539,15 @@ func (m *MySQL) List(ctx context.Context, target string, v any, prm *list.List, 
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
 	}
 
-	defaultSearch := "SELECT * FROM " + trgt
-
-	if finalParam.Search == "" {
-		finalParam.Search = defaultSearch
+	// Honor a caller-provided Search; only default when none was supplied.
+	// Copy prm so defaulting never mutates the caller-owned params struct.
+	if prm != nil {
+		prmCopy := *prm
+		finalParam = &prmCopy
 	}
 
-	if prm != nil {
-		if prm.Search != "" {
-			prm.Search = defaultSearch
-		}
-
-		finalParam = prm
+	if finalParam.Search == "" {
+		finalParam.Search = "SELECT * FROM " + trgt
 	}
 
 	//////

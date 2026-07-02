@@ -174,18 +174,15 @@ func (p *Postgres) Count(ctx context.Context, target string, prm *count.Count, o
 		return 0, customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCountedFailed())
 	}
 
-	defaultSearch := "SELECT COUNT(*) FROM " + trgt
-
-	if finalParam.Search == "" {
-		finalParam.Search = defaultSearch
+	// Honor a caller-provided Search; only default when none was supplied.
+	// Copy prm so defaulting never mutates the caller-owned params struct.
+	if prm != nil {
+		prmCopy := *prm
+		finalParam = &prmCopy
 	}
 
-	if prm != nil {
-		if prm.Search != "" {
-			prm.Search = defaultSearch
-		}
-
-		finalParam = prm
+	if finalParam.Search == "" {
+		finalParam.Search = "SELECT COUNT(*) FROM " + trgt
 	}
 
 	//////
@@ -533,18 +530,15 @@ func (p *Postgres) List(ctx context.Context, target string, v any, prm *list.Lis
 		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
 	}
 
-	defaultSearch := "SELECT * FROM " + trgt
-
-	if finalParam.Search == "" {
-		finalParam.Search = defaultSearch
+	// Honor a caller-provided Search; only default when none was supplied.
+	// Copy prm so defaulting never mutates the caller-owned params struct.
+	if prm != nil {
+		prmCopy := *prm
+		finalParam = &prmCopy
 	}
 
-	if prm != nil {
-		if prm.Search != "" {
-			prm.Search = defaultSearch
-		}
-
-		finalParam = prm
+	if finalParam.Search == "" {
+		finalParam.Search = "SELECT * FROM " + trgt
 	}
 
 	//////
