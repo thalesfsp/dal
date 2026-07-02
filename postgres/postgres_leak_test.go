@@ -156,3 +156,41 @@ func TestNew_PingFailure_ClosesHandle(t *testing.T) {
 		)
 	}
 }
+
+// TestNew_CalledTwice_NoExpvarPanic proves postgres.New can be called more than
+// once in a single process without panicking. storage.New (invoked by every
+// postgres.New) registers a fixed per-type set of expvar counters keyed by
+// deterministic names like "storage.postgres.counted.counter"; Go's expvar
+// panics ("Reuse of exported var name: ...") on a duplicate registration, so a
+// second New for the same storage type would crash the process.
+//
+// This is exactly the real CI scenario that motivated the fix: the ping-failure
+// leak test above calls New (registering the counters), then the offline path
+// here — and, in the integration binary, the E2E TestNew — calls New again. Both
+// go through storage.New, so the counters are registered twice.
+//
+// The whole test body must complete without a panic (a panic in expvar.Publish
+// would abort the goroutine and fail the test). Ping still fails on both calls,
+// so New returns an error each time; we assert only that neither call panicked
+// and both returned the expected error — the point is process survival, not the
+// error itself.
+//
+// Negative control: revert metrics.NewInt to register unconditionally (drop the
+// expvar.Get reuse guard); the second New below panics with
+// "Reuse of exported var name: storage.postgres.counted.counter".
+func TestNew_CalledTwice_NoExpvarPanic(t *testing.T) {
+	registerCountingDriver(t)
+	withInjectedDriver(t)
+
+	// First New: registers storage.postgres.* counters via storage.New.
+	if _, err := New(context.Background(), "counting://ignored-1"); err == nil {
+		t.Fatalf("New (1st): expected a ping-failure error, got nil")
+	}
+
+	// Second New: re-enters storage.New with the SAME per-type counter names.
+	// Before the idempotency guard this panics inside expvar.Publish; after it,
+	// the counters are reused and New simply returns the ping-failure error.
+	if _, err := New(context.Background(), "counting://ignored-2"); err == nil {
+		t.Fatalf("New (2nd): expected a ping-failure error, got nil")
+	}
+}
