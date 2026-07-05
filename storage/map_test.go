@@ -105,7 +105,7 @@ func TestCreateIntoMany(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx := t.Context()
 
 			m := make(Map)
 			m["m1"] = m1
@@ -136,7 +136,7 @@ func TestDeleteFromMany(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := DeleteFromMany(context.Background(), Map{"m1": m1, "m2": m2}, "id", "target", nil)
+			got, err := DeleteFromMany(t.Context(), Map{"m1": m1, "m2": m2}, "id", "target", nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DeleteMany() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -159,7 +159,7 @@ func TestListFromMany(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ListFromMany[string](context.Background(), Map{"m1": m1, "m2": m2}, "target", nil)
+			got, err := ListFromMany[string](t.Context(), Map{"m1": m1, "m2": m2}, "target", nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ListMany() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -184,7 +184,7 @@ func TestRetrieveFromMany(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := RetrieveFromMany[*TestDataS](context.Background(), Map{"m1": m1, "m2": m2}, "id", "target", nil)
+			got, err := RetrieveFromMany[*TestDataS](t.Context(), Map{"m1": m1, "m2": m2}, "id", "target", nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("RetrieveMany() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -213,7 +213,7 @@ func TestUpdateIntoMany(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := UpdateIntoMany(context.Background(), Map{"m1": m1, "m2": m2}, "id", "target", "value", nil)
+			got, err := UpdateIntoMany(t.Context(), Map{"m1": m1, "m2": m2}, "id", "target", "value", nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("UpdateMany() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -237,7 +237,7 @@ func TestCountFromMany(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := CountFromMany(context.Background(), Map{"m1": m1, "m2": m2}, "target", nil)
+			got, err := CountFromMany(t.Context(), Map{"m1": m1, "m2": m2}, "target", nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("CountMany() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -263,7 +263,7 @@ func TestCreateMany(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx := t.Context()
 
 			got, err := CreateMany(ctx, m1, "target", nil, map[string]string{"1": "content1", "2": "content2"})
 			if (err != nil) != tt.wantErr {
@@ -290,7 +290,7 @@ func TestDeleteMany(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := DeleteMany(context.Background(), m1, "target", nil, "1", "2")
+			got, err := DeleteMany(t.Context(), m1, "target", nil, "1", "2")
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DeleteMany() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -319,7 +319,7 @@ func TestRetrieveMany(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx := t.Context()
 
 			got, err := RetrieveMany[TestDataS](ctx, m1, "target", nil, "1", "2")
 			if (err != nil) != tt.wantErr {
@@ -348,7 +348,7 @@ func TestUpdateMany(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := UpdateMany(context.Background(), m1, "target", nil, map[string]string{"1": "content1", "2": "content2"})
+			got, err := UpdateMany(t.Context(), m1, "target", nil, map[string]string{"1": "content1", "2": "content2"})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("UpdateMany() error = %v, wantErr %v", err, tt.wantErr)
 				return

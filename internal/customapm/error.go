@@ -44,6 +44,10 @@ func TraceError(
 	l sypl.ISypl,
 	metric *expvar.Int,
 ) error {
+	if err == nil {
+		return nil
+	}
+
 	//////
 	// Metric.
 	//////
@@ -77,7 +81,9 @@ func TraceError(
 	}
 
 	// Tells APM that it that was an error.
-	apm.CaptureError(ctx, err).Send()
+	if apmErr := apm.CaptureError(ctx, err); apmErr != nil {
+		apmErr.Send()
+	}
 
 	//////
 	// Logging

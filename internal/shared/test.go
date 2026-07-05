@@ -130,16 +130,11 @@ func CreateHTTPTestServer(
 		// Set status code.
 		res.WriteHeader(statusCode)
 
-		// Set body.
-		if _, err := res.Write([]byte(body)); err != nil {
-			http.Error(res, err.Error(), http.StatusInternalServerError)
-
-			return
-		}
+		// Set body. Headers are already sent, so a failed write can't change
+		// the status code anymore — just stop.
+		//nolint:errcheck
+		res.Write([]byte(body))
 	}))
-
-	// Give enough time to be ready.
-	time.Sleep(1 * time.Second)
 
 	return testServer
 }
@@ -151,6 +146,12 @@ func ErrorContains(err error, text ...string) bool {
 	}
 
 	for _, t := range text {
+		// An empty expected substring would vacuously match any error,
+		// masking regressions — never treat it as a match.
+		if t == "" {
+			continue
+		}
+
 		if strings.Contains(err.Error(), t) {
 			return true
 		}

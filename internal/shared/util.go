@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -124,6 +125,22 @@ func PrintErrorMessages(errors ...error) string {
 	finalErrMsg = strings.TrimSuffix(finalErrMsg, ". ")
 
 	return finalErrMsg
+}
+
+// safeSQLIdentifier matches plain, optionally dot-qualified SQL identifiers
+// (e.g. "users", "public.users").
+var safeSQLIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)*$`)
+
+// ValidateSQLIdentifier ensures s is a plain (optionally dot-qualified) SQL
+// identifier, so it can be safely interpolated into a statement as a table
+// name. It rejects anything carrying quotes, spaces, or statement separators,
+// which would otherwise allow SQL injection through the target parameter.
+func ValidateSQLIdentifier(s string) error {
+	if !safeSQLIdentifier.MatchString(s) {
+		return customerror.NewInvalidError("target: not a valid SQL identifier")
+	}
+
+	return nil
 }
 
 // TargetName returns the provided target name, or the configured one. A target,

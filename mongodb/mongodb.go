@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/thalesfsp/customerror"
@@ -38,7 +39,10 @@ import (
 const Name = "mongodb"
 
 // Singleton.
-var singleton storage.IStorage
+var (
+	singleton      storage.IStorage
+	singletonMutex sync.RWMutex
+)
 
 // Config is the MongoDB configuration.
 type Config = options.ClientOptions
@@ -586,7 +590,7 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 	// Matches all documents
 	var filter bson.M
 
-	if flt, ok := prm.Any.(bson.M); ok {
+	if flt, ok := finalParam.Any.(bson.M); ok {
 		filter = flt
 	}
 
@@ -872,14 +876,25 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 		"$set": updateFields,
 	}
 
-	if _, err := m.
+	updateResult, err := m.
 		Client.
 		Database(o.Database).
 		Collection(trgt).
-		UpdateOne(ctx, bson.M{"_id": id}, update); err != nil {
+		UpdateOne(ctx, bson.M{"_id": id}, update)
+	if err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
+			m.GetLogger(),
+			m.GetCounterUpdatedFailed(),
+		)
+	}
+
+	// Surface updates that matched nothing as 404, consistent with Retrieve.
+	if updateResult.MatchedCount == 0 && updateResult.UpsertedCount == 0 {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewHTTPError(http.StatusNotFound),
 			m.GetLogger(),
 			m.GetCounterUpdatedFailed(),
 		)
@@ -940,9 +955,20 @@ func New(ctx context.Context, db string, cfg *Config) (*MongoDB, error) {
 		)
 	}
 
+	// Disconnect the client if New fails past this point, otherwise its
+	// connection pool and topology-monitoring goroutines leak.
+	success := false
+
+	defer func() {
+		if !success {
+			//nolint:errcheck
+			client.Disconnect(context.WithoutCancel(ctx))
+		}
+	}()
+
 	r := retrier.New(retrier.ExponentialBackoff(3, shared.TimeoutPing), nil)
 
-	if err := r.Run(func() error {
+	if err := r.RunCtx(ctx, func(ctx context.Context) error {
 		if err := client.Ping(ctx, nil); err != nil {
 			cE := customerror.NewFailedToError(
 				"ping",
@@ -973,7 +999,11 @@ func New(ctx context.Context, db string, cfg *Config) (*MongoDB, error) {
 		return nil, customapm.TraceError(ctx, err, s.GetLogger(), nil)
 	}
 
+	success = true
+
+	singletonMutex.Lock()
 	singleton = storage
+	singletonMutex.Unlock()
 
 	return storage, nil
 }
@@ -984,14 +1014,20 @@ func New(ctx context.Context, db string, cfg *Config) (*MongoDB, error) {
 
 // Get returns a setup storage, or set it up.
 func Get() storage.IStorage {
-	if singleton == nil {
+	singletonMutex.RLock()
+	s := singleton
+	singletonMutex.RUnlock()
+
+	if s == nil {
 		panic(fmt.Sprintf("%s %s not %s", Name, storage.Type, status.Initialized))
 	}
 
-	return singleton
+	return s
 }
 
 // Set sets the storage, primarily used for testing.
 func Set(s storage.IStorage) {
+	singletonMutex.Lock()
 	singleton = s
+	singletonMutex.Unlock()
 }

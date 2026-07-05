@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"path"
 	"strings"
 	"sync"
 
@@ -32,7 +33,10 @@ import (
 const Name = "memory"
 
 // Singleton.
-var singleton storage.IStorage
+var (
+	singleton      storage.IStorage
+	singletonMutex sync.RWMutex
+)
 
 // Memory storage definition.
 type Memory struct {
@@ -53,6 +57,25 @@ type Memory struct {
 //////
 // Implements the IStorage interface.
 //////
+
+// keyMatches reports whether the stored key matches the glob pattern. Keys
+// that aren't strings never match. A malformed pattern returns an error.
+func keyMatches(pattern string, key interface{}) (bool, error) {
+	k, ok := key.(string)
+	if !ok {
+		return false, nil
+	}
+
+	matched, err := path.Match(pattern, k)
+	if err != nil {
+		return false, customerror.NewInvalidError(
+			"search pattern",
+			customerror.WithError(err),
+		)
+	}
+
+	return matched, nil
+}
 
 // Count returns the number of items in the storage.
 func (s *Memory) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
@@ -110,13 +133,33 @@ func (s *Memory) Count(ctx context.Context, target string, prm *count.Count, opt
 		}
 	}
 
+	pattern := finalParam.Search
+	if pattern == "" {
+		pattern = "*"
+	}
+
 	count := 0
 
+	var matchErr error
+
 	s.client.Range(func(key, value interface{}) bool {
-		count++
+		matched, err := keyMatches(pattern, key)
+		if err != nil {
+			matchErr = err
+
+			return false
+		}
+
+		if matched {
+			count++
+		}
 
 		return true
 	})
+
+	if matchErr != nil {
+		return 0, customapm.TraceError(ctx, matchErr, s.GetLogger(), s.GetCounterCountedFailed())
+	}
 
 	if o.PostHookFunc != nil {
 		if err := o.PostHookFunc(ctx, s, "", target, int64(count), finalParam); err != nil {
@@ -302,23 +345,32 @@ func (s *Memory) Retrieve(ctx context.Context, id, target string, v any, prm *re
 	if !ok {
 		return customapm.TraceError(
 			ctx,
-			customerror.NewNotFoundError(storage.OperationRetrieve.String(),
-				customerror.WithError(err),
+			customerror.NewNotFoundError(storage.OperationRetrieve.String()),
+			s.GetLogger(),
+			s.GetCounterRetrievedFailed(),
+		)
+	}
+
+	b, ok := val.([]byte)
+	if !ok {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewFailedToError(
+				storage.OperationRetrieve.String(),
+				customerror.WithError(fmt.Errorf("stored value for id %q is %T, not []byte", id, val)),
 			),
 			s.GetLogger(),
 			s.GetCounterRetrievedFailed(),
 		)
 	}
 
-	if b, ok := val.([]byte); ok {
-		if err := shared.Unmarshal(b, v); err != nil {
-			return customapm.TraceError(
-				ctx,
-				err,
-				s.GetLogger(),
-				s.GetCounterRetrievedFailed(),
-			)
-		}
+	if err := shared.Unmarshal(b, v); err != nil {
+		return customapm.TraceError(
+			ctx,
+			err,
+			s.GetLogger(),
+			s.GetCounterRetrievedFailed(),
+		)
 	}
 
 	if o.PostHookFunc != nil {
@@ -408,15 +460,37 @@ func (s *Memory) List(ctx context.Context, target string, v any, prm *list.List,
 		}
 	}
 
+	pattern := finalParam.Search
+	if pattern == "" {
+		pattern = "*"
+	}
+
 	items := `{"items":[`
 
+	var matchErr error
+
 	s.client.Range(func(key, value interface{}) bool {
+		matched, err := keyMatches(pattern, key)
+		if err != nil {
+			matchErr = err
+
+			return false
+		}
+
+		if !matched {
+			return true
+		}
+
 		if b, ok := value.([]byte); ok {
 			items += string(b) + ","
 		}
 
 		return true
 	})
+
+	if matchErr != nil {
+		return customapm.TraceError(ctx, matchErr, s.GetLogger(), s.GetCounterListedFailed())
+	}
 
 	// Remove the last comma.
 	items = strings.TrimSuffix(items, ",")
@@ -458,6 +532,17 @@ func (s *Memory) List(ctx context.Context, target string, v any, prm *list.List,
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
 func (s *Memory) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
+	// The id is the storage key — an empty one would create a record that
+	// Retrieve/Delete/Update (which reject empty ids) could never address.
+	if id == "" {
+		return "", customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			s.GetLogger(),
+			s.GetCounterCreatedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -684,7 +769,9 @@ func New(ctx context.Context) (*Memory, error) {
 	// Singleton.
 	//////
 
+	singletonMutex.Lock()
 	singleton = storage
+	singletonMutex.Unlock()
 
 	return storage, nil
 }
@@ -695,14 +782,20 @@ func New(ctx context.Context) (*Memory, error) {
 
 // Get returns a setup storage, or set it up.
 func Get() storage.IStorage {
-	if singleton == nil {
+	singletonMutex.RLock()
+	s := singleton
+	singletonMutex.RUnlock()
+
+	if s == nil {
 		panic(fmt.Sprintf("%s %s not %s", Name, storage.Type, status.Initialized))
 	}
 
-	return singleton
+	return s
 }
 
 // Set sets the storage, primarily used for testing.
 func Set(s storage.IStorage) {
+	singletonMutex.Lock()
 	singleton = s
+	singletonMutex.Unlock()
 }

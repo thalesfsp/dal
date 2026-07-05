@@ -5,11 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
@@ -40,7 +42,10 @@ import (
 const Name = "s3"
 
 // Singleton.
-var singleton storage.IStorage
+var (
+	singleton      storage.IStorage
+	singletonMutex sync.RWMutex
+)
 
 // Config is the S3 configuration.
 type Config = aws.Config
@@ -346,7 +351,7 @@ func (s *S3) Retrieve(ctx context.Context, id, target string, v any, prm *retrie
 
 	trgt, err := shared.TargetName(target, s.Target)
 	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
 	}
 
 	//////
@@ -366,6 +371,16 @@ func (s *S3) Retrieve(ctx context.Context, id, target string, v any, prm *retrie
 
 	output, err := s.Client.GetObjectWithContext(ctx, input)
 	if err != nil {
+		var awsErr awserr.Error
+		if errors.As(err, &awsErr) &&
+			(awsErr.Code() == s3.ErrCodeNoSuchKey || awsErr.Code() == "NotFound") {
+			return customapm.TraceError(
+				ctx,
+				customerror.NewHTTPError(http.StatusNotFound),
+				s.GetLogger(),
+				s.GetCounterRetrievedFailed())
+		}
+
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationRetrieve.String(),
@@ -374,6 +389,9 @@ func (s *S3) Retrieve(ctx context.Context, id, target string, v any, prm *retrie
 			s.GetLogger(),
 			s.GetCounterRetrievedFailed())
 	}
+
+	// The body is an open HTTP response stream; it must always be closed.
+	defer output.Body.Close()
 
 	data, err := shared.ReadAll(output.Body)
 	if err != nil {
@@ -640,7 +658,7 @@ func (s *S3) Create(ctx context.Context, id, target string, v any, prm *create.C
 	}
 
 	// Perform the S3 upload request.
-	uO, err := s.uploader.Upload(uploadInput)
+	uO, err := s.uploader.UploadWithContext(ctx, uploadInput)
 	if err != nil {
 		// If an error occurred, log it and return.
 		return "", customapm.TraceError(
@@ -795,7 +813,7 @@ func (s *S3) Update(ctx context.Context, id, target string, v any, prm *update.U
 	}
 
 	// Perform the S3 upload request.
-	if _, err := s.uploader.Upload(uploadInput); err != nil {
+	if _, err := s.uploader.UploadWithContext(ctx, uploadInput); err != nil {
 		// If an error occurred, log it and return.
 		return customapm.TraceError(
 			ctx,
@@ -845,15 +863,6 @@ func (s *S3) GetClient() any {
 
 // New creates a new S3 storage.
 func New(ctx context.Context, bucket string, cfg *Config) (*S3, error) {
-	if singleton != nil {
-		s3Storage, ok := singleton.(*S3)
-		if !ok {
-			return nil, customerror.NewFailedToError("retrieve client")
-		}
-
-		return s3Storage, nil
-	}
-
 	// Enforces IStorage interface implementation.
 	var _ storage.IStorage = (*S3)(nil)
 
@@ -872,7 +881,15 @@ func New(ctx context.Context, bucket string, cfg *Config) (*S3, error) {
 
 	sess, err := session.NewSession(cfg)
 	if err != nil {
-		log.Fatal(err)
+		return nil, customapm.TraceError(
+			ctx,
+			customerror.NewFailedToError(
+				"create AWS session",
+				customerror.WithError(err),
+			),
+			s.GetLogger(),
+			nil,
+		)
 	}
 
 	client := s3.New(sess)
@@ -883,7 +900,7 @@ func New(ctx context.Context, bucket string, cfg *Config) (*S3, error) {
 
 	r := retrier.New(retrier.ExponentialBackoff(3, 10*time.Second), nil)
 
-	if err := r.Run(func() error {
+	if err := r.RunCtx(ctx, func(ctx context.Context) error {
 		input := &s3.HeadBucketInput{
 			Bucket: aws.String(bucket),
 		}
@@ -927,7 +944,9 @@ func New(ctx context.Context, bucket string, cfg *Config) (*S3, error) {
 	// Singleton.
 	//////
 
+	singletonMutex.Lock()
 	singleton = storage
+	singletonMutex.Unlock()
 
 	return storage, nil
 }
@@ -938,16 +957,22 @@ func New(ctx context.Context, bucket string, cfg *Config) (*S3, error) {
 
 // Get returns a setup storage, or set it up.
 func Get() storage.IStorage {
-	if singleton == nil {
+	singletonMutex.RLock()
+	s := singleton
+	singletonMutex.RUnlock()
+
+	if s == nil {
 		panic(fmt.Sprintf("%s %s not %s", Name, storage.Type, status.Initialized))
 	}
 
-	return singleton
+	return s
 }
 
 // Set sets the storage, primarily used for testing.
 func Set(s storage.IStorage) {
+	singletonMutex.Lock()
 	singleton = s
+	singletonMutex.Unlock()
 }
 
 // RetrieveSigned generates a pre-signed URL for an S3 object.
@@ -985,7 +1010,7 @@ func RetrieveSigned(
 				customerror.WithError(errors.New("failed to retrieve client")),
 			),
 			s.GetLogger(),
-			s.GetCounterCreatedFailed(),
+			s.GetCounterRetrievedFailed(),
 		)
 	}
 
@@ -1009,7 +1034,7 @@ func RetrieveSigned(
 				customerror.WithError(err),
 			),
 			s.GetLogger(),
-			s.GetCounterCreatedFailed(),
+			s.GetCounterRetrievedFailed(),
 		)
 	}
 

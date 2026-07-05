@@ -3,7 +3,9 @@ package dynamodb
 import (
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
+	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -15,6 +17,44 @@ import (
 //////
 // Utility functions for DynamoDB operations.
 //////
+
+// sanitizePlaceholder converts an attribute name into a string that is safe to
+// use as a DynamoDB expression placeholder suffix (only [A-Za-z0-9_] is
+// allowed). When characters are replaced, a short FNV-1a hash of the original
+// name is appended so distinct names (e.g. "a-b" and "a.b") can't collide.
+func sanitizePlaceholder(name string) string {
+	safe := true
+
+	for _, r := range name {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' {
+			safe = false
+
+			break
+		}
+	}
+
+	if safe {
+		return name
+	}
+
+	var b strings.Builder
+
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+
+	h := fnv.New32a()
+
+	// Write never fails on hash.Hash.
+
+	h.Write([]byte(name))
+
+	return fmt.Sprintf("%s_%x", b.String(), h.Sum32())
+}
 
 // IsNotFoundError checks if the error is a DynamoDB item not found error.
 func IsNotFoundError(err error) bool {
@@ -72,8 +112,10 @@ func BuildFilterExpression(conditions map[string]interface{}) (
 	attributeValues := make(map[string]*dynamodb.AttributeValue)
 
 	for key, value := range conditions {
-		attrName := fmt.Sprintf("#%s", key)
-		attrValue := fmt.Sprintf(":%s", key)
+		placeholder := sanitizePlaceholder(key)
+
+		attrName := fmt.Sprintf("#%s", placeholder)
+		attrValue := fmt.Sprintf(":%s", placeholder)
 
 		expressions = append(expressions, fmt.Sprintf("%s = %s", attrName, attrValue))
 		attributeNames[attrName] = aws.String(key)
@@ -89,7 +131,7 @@ func BuildFilterExpression(conditions map[string]interface{}) (
 		return nil, nil, nil, nil
 	}
 
-	expression := fmt.Sprintf("(%s)", fmt.Sprintf(expressions[0]))
+	expression := fmt.Sprintf("(%s)", expressions[0])
 	for i := 1; i < len(expressions); i++ {
 		expression = fmt.Sprintf("%s AND (%s)", expression, expressions[i])
 	}
@@ -118,8 +160,10 @@ func BuildUpdateExpression(updates map[string]interface{}, primaryKey string) (
 			continue
 		}
 
-		attrName := fmt.Sprintf("#%s", key)
-		attrValue := fmt.Sprintf(":%s", key)
+		placeholder := sanitizePlaceholder(key)
+
+		attrName := fmt.Sprintf("#%s", placeholder)
+		attrValue := fmt.Sprintf(":%s", placeholder)
 
 		setExpressions = append(setExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
 		attributeNames[attrName] = aws.String(key)
@@ -153,7 +197,7 @@ func BuildProjectionExpression(fields []string) (*string, map[string]*string) {
 	projections := make([]string, 0, len(fields))
 
 	for _, field := range fields {
-		attrName := fmt.Sprintf("#%s", field)
+		attrName := fmt.Sprintf("#%s", sanitizePlaceholder(field))
 		projections = append(projections, attrName)
 		attributeNames[attrName] = aws.String(field)
 	}

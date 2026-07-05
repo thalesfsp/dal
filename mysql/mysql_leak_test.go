@@ -128,7 +128,7 @@ func TestNew_PingFailure_ClosesHandle(t *testing.T) {
 	beforeCloses := ctr.closes.Load()
 
 	// The counting driver's Ping always fails, so New must return an error.
-	storage, err := New(context.Background(), "counting://ignored")
+	storage, err := New(t.Context(), "counting://ignored")
 	if err == nil {
 		t.Fatalf("New: expected a ping-failure error, got nil (storage=%v)", storage)
 	}
@@ -183,14 +183,14 @@ func TestNew_CalledTwice_NoExpvarPanic(t *testing.T) {
 	withInjectedDriver(t)
 
 	// First New: registers storage.mysql.* counters via storage.New.
-	if _, err := New(context.Background(), "counting://ignored-1"); err == nil {
+	if _, err := New(t.Context(), "counting://ignored-1"); err == nil {
 		t.Fatalf("New (1st): expected a ping-failure error, got nil")
 	}
 
 	// Second New: re-enters storage.New with the SAME per-type counter names.
 	// Before the idempotency guard this panics inside expvar.Publish; after it,
 	// the counters are reused and New simply returns the ping-failure error.
-	if _, err := New(context.Background(), "counting://ignored-2"); err == nil {
+	if _, err := New(t.Context(), "counting://ignored-2"); err == nil {
 		t.Fatalf("New (2nd): expected a ping-failure error, got nil")
 	}
 }

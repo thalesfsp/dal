@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -43,7 +44,10 @@ import (
 const Name = "dynamodb"
 
 // Singleton.
-var singleton storage.IStorage
+var (
+	singleton      storage.IStorage
+	singletonMutex sync.RWMutex
+)
 
 // DynamicTableFunc is a function which defines the name of the table, and
 // evaluated at the operation time.
@@ -189,8 +193,10 @@ func (d *DynamoDB) Count(ctx context.Context, target string, prm *count.Count, o
 		expressionAttributeValues := make(map[string]*dynamodb.AttributeValue)
 
 		for key, value := range filterMap {
-			attrName := fmt.Sprintf("#%s", key)
-			attrValue := fmt.Sprintf(":%s", key)
+			placeholder := sanitizePlaceholder(key)
+
+			attrName := fmt.Sprintf("#%s", placeholder)
+			attrValue := fmt.Sprintf(":%s", placeholder)
 
 			filterExpressions = append(filterExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
 			expressionAttributeNames[attrName] = aws.String(key)
@@ -214,17 +220,30 @@ func (d *DynamoDB) Count(ctx context.Context, target string, prm *count.Count, o
 		}
 	}
 
-	result, err := d.Client.ScanWithContext(ctx, scanInput)
-	if err != nil {
-		return 0, customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCount.String(), customerror.WithError(err)),
-			d.GetLogger(),
-			d.GetCounterCountedFailed(),
-		)
-	}
+	// Scan pages are capped at 1MB — paginate to count the whole table.
+	var count int64
 
-	count := *result.Count
+	for {
+		result, err := d.Client.ScanWithContext(ctx, scanInput)
+		if err != nil {
+			return 0, customapm.TraceError(
+				ctx,
+				customerror.NewFailedToError(storage.OperationCount.String(), customerror.WithError(err)),
+				d.GetLogger(),
+				d.GetCounterCountedFailed(),
+			)
+		}
+
+		if result.Count != nil {
+			count += *result.Count
+		}
+
+		if len(result.LastEvaluatedKey) == 0 {
+			break
+		}
+
+		scanInput.ExclusiveStartKey = result.LastEvaluatedKey
+	}
 
 	if o.PostHookFunc != nil {
 		if err := o.PostHookFunc(ctx, d, "", trgt, count, finalParam); err != nil {
@@ -583,6 +602,7 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 
 	scanInput := &dynamodb.ScanInput{
 		TableName: aws.String(trgt),
+		Select:    aws.String(dynamodb.SelectCount),
 	}
 
 	// Fields projection
@@ -591,7 +611,7 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 		expressionAttributeNames := make(map[string]*string)
 
 		for _, field := range finalParam.Fields {
-			attrName := fmt.Sprintf("#%s", field)
+			attrName := fmt.Sprintf("#%s", sanitizePlaceholder(field))
 			projectionExpressions = append(projectionExpressions, attrName)
 			expressionAttributeNames[attrName] = aws.String(field)
 		}
@@ -601,7 +621,7 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 	}
 
 	// Limit
-	if finalParam.Limit >= 0 {
+	if finalParam.Limit > 0 {
 		scanInput.Limit = aws.Int64(int64(finalParam.Limit))
 	}
 
@@ -614,8 +634,10 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 		expressionAttributeValues := make(map[string]*dynamodb.AttributeValue)
 
 		for key, value := range filter {
-			attrName := fmt.Sprintf("#f%s", key)
-			attrValue := fmt.Sprintf(":f%s", key)
+			placeholder := sanitizePlaceholder(key)
+
+			attrName := fmt.Sprintf("#f%s", placeholder)
+			attrValue := fmt.Sprintf(":f%s", placeholder)
 
 			filterExpressions = append(filterExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
 			scanInput.ExpressionAttributeNames[attrName] = aws.String(key)
@@ -987,8 +1009,10 @@ func (d *DynamoDB) Update(ctx context.Context, id, target string, v any, prm *up
 			continue
 		}
 
-		attrName := fmt.Sprintf("#%s", key)
-		attrValue := fmt.Sprintf(":%s", key)
+		placeholder := sanitizePlaceholder(key)
+
+		attrName := fmt.Sprintf("#%s", placeholder)
+		attrValue := fmt.Sprintf(":%s", placeholder)
 
 		updateExpressions = append(updateExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
 		expressionAttributeNames[attrName] = aws.String(key)
@@ -1106,7 +1130,14 @@ func NewWithDynamicTable(ctx context.Context, region string, dynamicTableFunc Dy
 	var finalConfig Config
 	if cfg != nil {
 		finalConfig = *cfg
-		sess, err = session.NewSession(cfg)
+
+		// The region argument still applies when the custom config doesn't
+		// set one.
+		if finalConfig.Region == nil || *finalConfig.Region == "" {
+			finalConfig.Region = aws.String(region)
+		}
+
+		sess, err = session.NewSession(&finalConfig)
 		if err != nil {
 			return nil, customapm.TraceError(
 				ctx,
@@ -1115,6 +1146,8 @@ func NewWithDynamicTable(ctx context.Context, region string, dynamicTableFunc Dy
 				s.GetCounterPingFailed(),
 			)
 		}
+	} else {
+		finalConfig = Config{Region: aws.String(region)}
 	}
 
 	// Create DynamoDB client
@@ -1123,7 +1156,7 @@ func NewWithDynamicTable(ctx context.Context, region string, dynamicTableFunc Dy
 	// Test connection
 	r := retrier.New(retrier.ExponentialBackoff(3, shared.TimeoutPing), nil)
 
-	if err := r.Run(func() error {
+	if err := r.RunCtx(ctx, func(ctx context.Context) error {
 		// Simple operation to test connectivity
 		_, err := client.ListTablesWithContext(ctx, &dynamodb.ListTablesInput{
 			Limit: aws.Int64(1),
@@ -1169,7 +1202,9 @@ func NewWithDynamicTable(ctx context.Context, region string, dynamicTableFunc Dy
 		)
 	}
 
+	singletonMutex.Lock()
 	singleton = storage
+	singletonMutex.Unlock()
 
 	return storage, nil
 }
@@ -1180,16 +1215,22 @@ func NewWithDynamicTable(ctx context.Context, region string, dynamicTableFunc Dy
 
 // Get returns a setup storage, or set it up.
 func Get() storage.IStorage {
-	if singleton == nil {
+	singletonMutex.RLock()
+	s := singleton
+	singletonMutex.RUnlock()
+
+	if s == nil {
 		panic(fmt.Sprintf("%s %s not %s", Name, storage.Type, status.Initialized))
 	}
 
-	return singleton
+	return s
 }
 
 // Set sets the storage, primarily used for testing.
 func Set(s storage.IStorage) {
+	singletonMutex.Lock()
 	singleton = s
+	singletonMutex.Unlock()
 }
 
 //////

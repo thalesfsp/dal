@@ -48,6 +48,12 @@ linters-settings:
 
 issues:
   exclude-rules:
+    # aws-sdk-go v1 is deprecated upstream; migrating the s3/dynamodb storages
+    # to aws-sdk-go-v2 is a separate, breaking effort.
+    - linters:
+        - staticcheck
+      text: "SA1019: .*aws-sdk-go is deprecated"
+
     - path: cmd/
       linters:
         - gochecknoinits

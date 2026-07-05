@@ -68,7 +68,7 @@ func CountFromMany(
 ) ([]int64, error) {
 	r, errs := concurrentloop.Map(ctx, m.ToSlice(), func(ctx context.Context, s IStorage) (int64, error) {
 		return Count(ctx, s, target, prm, options...)
-	})
+	}, concurrentloop.WithRemoveZeroValues(false))
 
 	if len(errs) > 0 {
 		return nil, errs
@@ -88,7 +88,7 @@ func CreateIntoMany[T any](
 ) ([]string, error) {
 	r, errs := concurrentloop.Map(ctx, m.ToSlice(), func(ctx context.Context, s IStorage) (string, error) {
 		return Create(ctx, s, id, target, t, prm, options...)
-	})
+	}, concurrentloop.WithRemoveZeroValues(false))
 
 	if len(errs) > 0 {
 		return nil, errs
@@ -111,7 +111,7 @@ func DeleteFromMany(
 		}
 
 		return true, nil
-	})
+	}, concurrentloop.WithRemoveZeroValues(false))
 
 	if len(errs) > 0 {
 		return nil, errs
@@ -132,7 +132,7 @@ func ListFromMany[T any](
 ) ([]T, error) {
 	r, errs := concurrentloop.Map(ctx, m.ToSlice(), func(ctx context.Context, s IStorage) ([]T, error) {
 		return List[[]T](ctx, s, target, prm, options...)
-	})
+	}, concurrentloop.WithRemoveZeroValues(false))
 
 	if len(errs) > 0 {
 		return nil, errs
@@ -150,12 +150,12 @@ func RetrieveFromMany[T any](
 	prm *retrieve.Retrieve,
 	options ...Func[*retrieve.Retrieve],
 ) ([]T, error) {
-	r, err := concurrentloop.Map(ctx, m.ToSlice(), func(ctx context.Context, s IStorage) (T, error) {
+	r, errs := concurrentloop.Map(ctx, m.ToSlice(), func(ctx context.Context, s IStorage) (T, error) {
 		return Retrieve[T](ctx, s, id, target, prm, options...)
-	})
+	}, concurrentloop.WithRemoveZeroValues(false))
 
-	if len(err) > 0 {
-		return nil, err[0]
+	if len(errs) > 0 {
+		return nil, errs
 	}
 
 	return r, nil
@@ -176,7 +176,7 @@ func UpdateIntoMany(
 		}
 
 		return true, nil
-	})
+	}, concurrentloop.WithRemoveZeroValues(false))
 
 	if len(errs) > 0 {
 		return nil, errs
@@ -204,7 +204,7 @@ func CreateMany[T any](
 		}
 
 		return id, nil
-	})
+	}, concurrentloop.WithRemoveZeroValues(false))
 
 	if len(errs) > 0 {
 		return nil, errs
@@ -227,7 +227,7 @@ func DeleteMany(
 		}
 
 		return true, nil
-	})
+	}, concurrentloop.WithRemoveZeroValues(false))
 
 	if len(errs) > 0 {
 		return nil, errs
@@ -246,7 +246,7 @@ func RetrieveMany[T any](
 ) ([]T, error) {
 	r, errs := concurrentloop.Map(ctx, ids, func(ctx context.Context, id string) (T, error) {
 		return Retrieve[T](ctx, str, id, target, prm)
-	})
+	}, concurrentloop.WithRemoveZeroValues(false))
 
 	if len(errs) > 0 {
 		return nil, errs
@@ -269,7 +269,7 @@ func UpdateMany[T any](
 		}
 
 		return true, nil
-	})
+	}, concurrentloop.WithRemoveZeroValues(false))
 
 	if len(errs) > 0 {
 		return nil, errs
