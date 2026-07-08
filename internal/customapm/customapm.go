@@ -62,6 +62,32 @@ func TXFromCtx(ctx context.Context, txName string, txType string) *apm.Transacti
 	return tx
 }
 
+// Span wraps the APM span of a traced operation and, when the operation had to
+// start its own transaction (none was found in the incoming context), the
+// transaction as well. End ends both, so implicitly-created transactions are
+// reported and returned to the tracer's pool instead of leaking.
+type Span struct {
+	span *apm.Span
+
+	// tx is non-nil only when Trace created the transaction itself.
+	tx *apm.Transaction
+}
+
+// End ends the span, and the transaction if this operation created it.
+func (s *Span) End() {
+	if s == nil {
+		return
+	}
+
+	if s.span != nil {
+		s.span.End()
+	}
+
+	if s.tx != nil {
+		s.tx.End()
+	}
+}
+
 // Trace will trace an operation. It uses the existing TX otherwise it fallback
 // creating a new TX then it creates a new span within the TX.
 //
@@ -109,12 +135,19 @@ func TXFromCtx(ctx context.Context, txName string, txType string) *apm.Transacti
 func Trace(
 	ctx context.Context,
 	what, nameOf, operation string,
-) (context.Context, *apm.Span) {
+) (context.Context, *Span) {
 	//////
 	// APM.
 	//////
 
-	tx := TXFromCtx(ctx, nameOf, what)
+	var createdTX *apm.Transaction
+
+	tx := apm.TransactionFromContext(ctx)
+	if tx == nil {
+		tx = apm.DefaultTracer.StartTransaction(nameOf, what)
+
+		createdTX = tx
+	}
 
 	ctx = apm.ContextWithTransaction(ctx, tx)
 
@@ -124,5 +157,5 @@ func Trace(
 		fmt.Sprintf("%s.%s.%s", what, nameOf, operation),
 	)
 
-	return ctx, span
+	return ctx, &Span{span: span, tx: createdTX}
 }

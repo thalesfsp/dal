@@ -95,7 +95,7 @@ func getTestStorage(ctx context.Context, t *testing.T) *SQLite {
 // back (the "filters" / LIMIT / ORDER BY sub-tests fail for exactly that
 // reason before the fix).
 func TestList_HonorsSearch(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	str := getTestStorage(ctx, t)
 
 	t.Run("happy - nil params returns all rows", func(t *testing.T) {
@@ -203,7 +203,7 @@ func TestList_HonorsSearch(t *testing.T) {
 // TestCount_HonorsSearch guards the identical overwrite bug in Count. It shares
 // the process-wide storage (see getTestStorage) so New() is called only once.
 func TestCount_HonorsSearch(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	str := getTestStorage(ctx, t)
 
 	t.Run("happy - nil params counts all rows", func(t *testing.T) {

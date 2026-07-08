@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/redis/go-redis/v9"
@@ -34,7 +35,10 @@ import (
 const Name = "redis"
 
 // Singleton.
-var singleton storage.IStorage
+var (
+	singleton      storage.IStorage
+	singletonMutex sync.RWMutex
+)
 
 // Config is the Redis configuration.
 type Config = redis.Options
@@ -119,9 +123,22 @@ func (r *Redis) Count(ctx context.Context, target string, prm *count.Count, opti
 		}
 	}
 
-	// retrieve keys matching a pattern
-	keys, err := r.Client.Keys(ctx, finalParam.Search).Result()
-	if err != nil {
+	pattern := finalParam.Search
+	if pattern == "" {
+		pattern = "*"
+	}
+
+	// Count keys matching the pattern using SCAN — unlike KEYS it doesn't
+	// block the server on large keyspaces.
+	var count int64
+
+	iter := r.Client.Scan(ctx, 0, pattern, 0).Iterator()
+
+	for iter.Next(ctx) {
+		count++
+	}
+
+	if err := iter.Err(); err != nil {
 		return 0, customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(
@@ -134,7 +151,7 @@ func (r *Redis) Count(ctx context.Context, target string, prm *count.Count, opti
 	}
 
 	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, r, "", target, int64(len(keys)), finalParam); err != nil {
+		if err := o.PostHookFunc(ctx, r, "", target, count, finalParam); err != nil {
 			return 0, customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterCountedFailed())
 		}
 	}
@@ -156,7 +173,7 @@ func (r *Redis) Count(ctx context.Context, target string, prm *count.Count, opti
 
 	r.GetCounterCounted().Add(1)
 
-	return int64(len(keys)), nil
+	return count, nil
 }
 
 // Delete removes data.
@@ -488,6 +505,17 @@ func (r *Redis) List(ctx context.Context, target string, v any, prm *list.List, 
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
 func (r *Redis) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
+	// The id is the storage key — an empty one would create a record that
+	// Retrieve/Delete/Update (which reject empty ids) could never address.
+	if id == "" {
+		return "", customapm.TraceError(
+			ctx,
+			customerror.NewRequiredError("id"),
+			r.GetLogger(),
+			r.GetCounterCreatedFailed(),
+		)
+	}
+
 	//////
 	// APM Tracing.
 	//////
@@ -662,7 +690,7 @@ func (r *Redis) Update(ctx context.Context, id, target string, v any, prm *updat
 				customerror.WithError(err),
 			),
 			r.GetLogger(),
-			r.GetCounterCountedFailed(),
+			r.GetCounterUpdatedFailed(),
 		)
 	}
 
@@ -713,9 +741,19 @@ func New(ctx context.Context, cfg *Config) (*Redis, error) {
 
 	client := redis.NewClient(cfg)
 
+	// Close the client if New fails past this point, otherwise its
+	// connection pool leaks.
+	success := false
+
+	defer func() {
+		if !success {
+			client.Close()
+		}
+	}()
+
 	r := retrier.New(retrier.ExponentialBackoff(3, shared.TimeoutPing), nil)
 
-	if err := r.Run(func() error {
+	if err := r.RunCtx(ctx, func(ctx context.Context) error {
 		if _, err := client.Ping(ctx).Result(); err != nil {
 			cE := customerror.NewFailedToError(
 				"ping",
@@ -744,7 +782,11 @@ func New(ctx context.Context, cfg *Config) (*Redis, error) {
 		return nil, customapm.TraceError(ctx, err, s.GetLogger(), nil)
 	}
 
+	success = true
+
+	singletonMutex.Lock()
 	singleton = storage
+	singletonMutex.Unlock()
 
 	return storage, nil
 }
@@ -755,14 +797,20 @@ func New(ctx context.Context, cfg *Config) (*Redis, error) {
 
 // Get returns a setup storage, or set it up.
 func Get() storage.IStorage {
-	if singleton == nil {
+	singletonMutex.RLock()
+	s := singleton
+	singletonMutex.RUnlock()
+
+	if s == nil {
 		panic(fmt.Sprintf("%s %s not %s", Name, storage.Type, status.Initialized))
 	}
 
-	return singleton
+	return s
 }
 
 // Set sets the storage, primarily used for testing.
 func Set(s storage.IStorage) {
+	singletonMutex.Lock()
 	singleton = s
+	singletonMutex.Unlock()
 }

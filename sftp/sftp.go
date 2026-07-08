@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
+	"strings"
+	"sync"
 
 	"github.com/pkg/sftp"
 	"github.com/thalesfsp/customerror"
@@ -35,7 +38,10 @@ import (
 const Name = "sftp"
 
 // Singleton.
-var singleton storage.IStorage
+var (
+	singleton      storage.IStorage
+	singletonMutex sync.RWMutex
+)
 
 type (
 	// Config is the SFTP configuration.
@@ -115,8 +121,11 @@ func (s *SFTP) Count(ctx context.Context, target string, prm *count.Count, optio
 	// Filter.
 	//////
 
-	if finalParam.Search != "" {
-		finalParam.Search = "*"
+	// Don't write into the caller's prm — copy the pattern, defaulting an
+	// empty one to match-all.
+	pattern := finalParam.Search
+	if pattern == "" {
+		pattern = "*"
 	}
 
 	//////
@@ -151,7 +160,21 @@ func (s *SFTP) Count(ctx context.Context, target string, prm *count.Count, optio
 	count := 0
 
 	for _, file := range files {
-		if !file.IsDir() {
+		if file.IsDir() {
+			continue
+		}
+
+		matched, err := path.Match(pattern, file.Name())
+		if err != nil {
+			return 0, customapm.TraceError(
+				ctx,
+				customerror.NewInvalidError("search pattern", customerror.WithError(err)),
+				s.GetLogger(),
+				s.GetCounterCountedFailed(),
+			)
+		}
+
+		if matched {
 			count++
 		}
 	}
@@ -819,17 +842,25 @@ func New(ctx context.Context, addr string, cfg *Config, options ...Option) (*SFT
 		return nil, err
 	}
 
-	u, err := url.Parse(addr)
-	if err != nil {
-		return nil, customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("convert addr to URL", customerror.WithError(err)),
-			s.GetLogger(),
-			s.GetCounterPingFailed(),
-		)
+	// Accept both the documented "host:port" form and a full
+	// "sftp://host:port" URL.
+	host := addr
+
+	if strings.Contains(addr, "://") {
+		u, err := url.Parse(addr)
+		if err != nil {
+			return nil, customapm.TraceError(
+				ctx,
+				customerror.NewFailedToError("convert addr to URL", customerror.WithError(err)),
+				s.GetLogger(),
+				s.GetCounterPingFailed(),
+			)
+		}
+
+		host = u.Host
 	}
 
-	conn, err := ssh.Dial("tcp", u.Host, cfg)
+	conn, err := ssh.Dial("tcp", host, cfg)
 	if err != nil {
 		return nil, customapm.TraceError(
 			ctx,
@@ -838,6 +869,16 @@ func New(ctx context.Context, addr string, cfg *Config, options ...Option) (*SFT
 			s.GetCounterPingFailed(),
 		)
 	}
+
+	// Close the SSH connection if New fails past this point, otherwise the
+	// TCP+SSH session leaks.
+	success := false
+
+	defer func() {
+		if !success {
+			conn.Close()
+		}
+	}()
 
 	client, err := sftp.NewClient(conn, options...)
 	if err != nil {
@@ -859,7 +900,11 @@ func New(ctx context.Context, addr string, cfg *Config, options ...Option) (*SFT
 		return nil, customapm.TraceError(ctx, err, s.GetLogger(), nil)
 	}
 
+	success = true
+
+	singletonMutex.Lock()
 	singleton = storage
+	singletonMutex.Unlock()
 
 	return storage, nil
 }
@@ -870,14 +915,20 @@ func New(ctx context.Context, addr string, cfg *Config, options ...Option) (*SFT
 
 // Get returns a setup SFTP, or set it up.
 func Get() storage.IStorage {
-	if singleton == nil {
+	singletonMutex.RLock()
+	s := singleton
+	singletonMutex.RUnlock()
+
+	if s == nil {
 		panic(fmt.Sprintf("%s %s not %s", Name, storage.Type, status.Initialized))
 	}
 
-	return singleton
+	return s
 }
 
 // Set sets the storage, primarily used for testing.
 func Set(s storage.IStorage) {
+	singletonMutex.Lock()
 	singleton = s
+	singletonMutex.Unlock()
 }

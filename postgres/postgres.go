@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 
 	// Import the postgres driver.
 	_ "github.com/doug-martin/goqu/v9/dialect/postgres"
@@ -41,7 +42,10 @@ import (
 const Name = "postgres"
 
 // Singleton.
-var singleton storage.IStorage
+var (
+	singleton      storage.IStorage
+	singletonMutex sync.RWMutex
+)
 
 // driverName is the database/sql driver `New` opens the client with. It
 // defaults to `Name` and exists as a test seam so the constructor's post-open
@@ -105,6 +109,10 @@ func (p *Postgres) createDB(ctx context.Context, name string) error {
 }
 
 func (p *Postgres) deleteTable(ctx context.Context, name string) error {
+	if err := shared.ValidateSQLIdentifier(name); err != nil {
+		return err
+	}
+
 	if _, err := p.
 		Client.
 		ExecContext(ctx, fmt.Sprintf("DROP TABLE %s", name)); err != nil {
@@ -115,6 +123,10 @@ func (p *Postgres) deleteTable(ctx context.Context, name string) error {
 }
 
 func (p *Postgres) createTable(ctx context.Context, name, description string) error {
+	if err := shared.ValidateSQLIdentifier(name); err != nil {
+		return err
+	}
+
 	sql := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s (
 		%s
@@ -189,6 +201,12 @@ func (p *Postgres) Count(ctx context.Context, target string, prm *count.Count, o
 	}
 
 	if finalParam.Search == "" {
+		// trgt is interpolated into the statement — reject anything that
+		// isn't a plain identifier (SQL injection guard).
+		if err := shared.ValidateSQLIdentifier(trgt); err != nil {
+			return 0, customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCountedFailed())
+		}
+
 		finalParam.Search = "SELECT COUNT(*) FROM " + trgt
 	}
 
@@ -309,7 +327,7 @@ func (p *Postgres) Delete(ctx context.Context, id, target string, prm *delete.De
 		}
 	}
 
-	ds := goqu.Delete(trgt).Where(goqu.C("id").Eq(id))
+	ds := goqu.Dialect(Name).Delete(trgt).Where(goqu.C("id").Eq(id))
 
 	// Convert the query to SQL, and arguments.
 	selectSQL, args, err := ds.ToSQL()
@@ -429,7 +447,7 @@ func (p *Postgres) Retrieve(ctx context.Context, id, target string, v any, prm *
 	}
 
 	// Build the statement.
-	ds := goqu.From(trgt).Where(goqu.C("id").Eq(id))
+	ds := goqu.Dialect(Name).From(trgt).Where(goqu.C("id").Eq(id))
 
 	// Convert the query to SQL, and arguments.
 	selectSQL, args, err := ds.ToSQL()
@@ -545,6 +563,12 @@ func (p *Postgres) List(ctx context.Context, target string, v any, prm *list.Lis
 	}
 
 	if finalParam.Search == "" {
+		// trgt is interpolated into the statement — reject anything that
+		// isn't a plain identifier (SQL injection guard).
+		if err := shared.ValidateSQLIdentifier(trgt); err != nil {
+			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
+		}
+
 		finalParam.Search = "SELECT * FROM " + trgt
 	}
 
@@ -659,7 +683,7 @@ func (p *Postgres) Create(ctx context.Context, id, target string, v any, prm *cr
 	}
 
 	// Build the statement.
-	ds := goqu.
+	ds := goqu.Dialect(Name).
 		Insert(trgt).
 		Rows(v).
 		Returning("id")
@@ -784,7 +808,7 @@ func (p *Postgres) Update(ctx context.Context, id, target string, v any, prm *up
 	}
 
 	// Build the statement.
-	ds := goqu.Update(trgt).Set(v).Where(goqu.C("id").Eq(id))
+	ds := goqu.Dialect(Name).Update(trgt).Set(v).Where(goqu.C("id").Eq(id))
 
 	// Convert the query to SQL, and arguments.
 	updateSQL, args, err := ds.ToSQL()
@@ -797,10 +821,21 @@ func (p *Postgres) Update(ctx context.Context, id, target string, v any, prm *up
 		)
 	}
 
-	if _, err := p.Client.ExecContext(ctx, updateSQL, args...); err != nil {
+	res, err := p.Client.ExecContext(ctx, updateSQL, args...)
+	if err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
+			p.GetLogger(),
+			p.GetCounterUpdatedFailed(),
+		)
+	}
+
+	// Surface updates that matched nothing as 404, consistent with Retrieve.
+	if rowsAffected, err := res.RowsAffected(); err == nil && rowsAffected == 0 {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewHTTPError(http.StatusNotFound),
 			p.GetLogger(),
 			p.GetCounterUpdatedFailed(),
 		)
@@ -880,7 +915,7 @@ func New(ctx context.Context, dataSource string) (*Postgres, error) {
 
 	r := retrier.New(retrier.ExponentialBackoff(3, shared.TimeoutPing), nil)
 
-	if err := r.Run(func() error {
+	if err := r.RunCtx(ctx, func(ctx context.Context) error {
 		if err := client.Ping(); err != nil {
 			cE := customerror.NewFailedToError(
 				"ping",
@@ -909,7 +944,9 @@ func New(ctx context.Context, dataSource string) (*Postgres, error) {
 		return nil, customapm.TraceError(ctx, err, s.GetLogger(), nil)
 	}
 
+	singletonMutex.Lock()
 	singleton = storage
+	singletonMutex.Unlock()
 
 	success = true
 
@@ -922,14 +959,20 @@ func New(ctx context.Context, dataSource string) (*Postgres, error) {
 
 // Get returns a setup storage, or set it up.
 func Get() storage.IStorage {
-	if singleton == nil {
+	singletonMutex.RLock()
+	s := singleton
+	singletonMutex.RUnlock()
+
+	if s == nil {
 		panic(fmt.Sprintf("%s %s not %s", Name, storage.Type, status.Initialized))
 	}
 
-	return singleton
+	return s
 }
 
 // Set sets the storage, primarily used for testing.
 func Set(s storage.IStorage) {
+	singletonMutex.Lock()
 	singleton = s
+	singletonMutex.Unlock()
 }

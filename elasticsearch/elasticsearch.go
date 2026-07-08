@@ -5,8 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/elastic/go-elasticsearch/v8"
@@ -38,7 +38,10 @@ import (
 const Name = "elasticsearch"
 
 // Singleton.
-var singleton storage.IStorage
+var (
+	singleton      storage.IStorage
+	singletonMutex sync.RWMutex
+)
 
 // DynamicIndexFunc is a function which defines the name of the index, and
 // evaluated at the index time.
@@ -143,10 +146,19 @@ func buildQuery(params *list.List, addons ...string) (string, error) {
 		builder.WriteString(fmt.Sprintf(`, "size": %d`, params.Limit))
 	}
 
-	// Check if prm.Any is type of ListAny.
-	if lA, ok := params.Any.(*ListAny); ok {
+	// Check if prm.Any is type of ListAny (pointer or value).
+	var listAny *ListAny
+
+	switch lA := params.Any.(type) {
+	case *ListAny:
+		listAny = lA
+	case ListAny:
+		listAny = &lA
+	}
+
+	if listAny != nil {
 		// Append the track_total_hits query parameter, if any.
-		if lA.TrackTotalHits {
+		if listAny.TrackTotalHits {
 			builder.WriteString(`, "track_total_hits": true`)
 		}
 	}
@@ -289,13 +301,13 @@ func (es *ElasticSearch) Count(ctx context.Context, target string, prm *count.Co
 	}
 
 	// Enables routing if specified.
-	if finalParam.Routing == nil {
+	if finalParam.Routing != nil {
 		req.Routing = finalParam.Routing
 	}
 
 	query, err := buildQuery(&list.List{
 		Search: finalParam.Search,
-		Any: ListAny{
+		Any: &ListAny{
 			TrackTotalHits: true,
 		},
 	})
@@ -580,15 +592,6 @@ func (es *ElasticSearch) Retrieve(ctx context.Context, id, target string, v any,
 		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterRetrievedFailed())
 	}
 
-	if res.Body == nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewHTTPError(http.StatusFound),
-			es.GetLogger(),
-			es.GetCounterRetrievedFailed(),
-		)
-	}
-
 	// Parse response body.
 	getResponse := ResponseSourceFromES{}
 
@@ -700,7 +703,7 @@ func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *li
 	}
 
 	// Enables routing if specified.
-	if finalParam.Routing == nil {
+	if finalParam.Routing != nil {
 		req.Routing = finalParam.Routing
 	}
 
@@ -1116,7 +1119,7 @@ func NewWithDynamicIndex(
 
 	r := retrier.New(retrier.ExponentialBackoff(3, shared.TimeoutPing), nil)
 
-	if err := r.Run(func() error {
+	if err := r.RunCtx(ctx, func(ctx context.Context) error {
 		res, err := client.Info(client.Info.WithContext(ctx))
 		if err != nil {
 			cE := customerror.NewFailedToError(
@@ -1176,7 +1179,9 @@ func NewWithDynamicIndex(
 		return nil, customapm.TraceError(ctx, err, s.GetLogger(), nil)
 	}
 
+	singletonMutex.Lock()
 	singleton = storage
+	singletonMutex.Unlock()
 
 	return storage, nil
 }
@@ -1187,16 +1192,22 @@ func NewWithDynamicIndex(
 
 // Get returns a setup storage, or set it up.
 func Get() storage.IStorage {
-	if singleton == nil {
+	singletonMutex.RLock()
+	s := singleton
+	singletonMutex.RUnlock()
+
+	if s == nil {
 		panic(fmt.Sprintf("%s %s not %s", Name, storage.Type, status.Initialized))
 	}
 
-	return singleton
+	return s
 }
 
 // Set sets the storage, primarily used for testing.
 func Set(s storage.IStorage) {
+	singletonMutex.Lock()
 	singleton = s
+	singletonMutex.Unlock()
 }
 
 // Query executes a search query against the ElasticSearch storage.
@@ -1238,7 +1249,7 @@ func Query(
 	if err := checkResponseIsError(res); err != nil {
 		return customapm.TraceError(
 			ctx,
-			customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed()),
+			err,
 			s.GetLogger(),
 			s.GetCounterListedFailed(),
 		)

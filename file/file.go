@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v2/internal/customapm"
@@ -34,7 +35,10 @@ import (
 const Name = "file"
 
 // Singleton.
-var singleton storage.IStorage
+var (
+	singleton      storage.IStorage
+	singletonMutex sync.RWMutex
+)
 
 // File storage definition.
 type File struct {
@@ -327,7 +331,7 @@ func (s *File) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 
 	trgt, err := shared.TargetName(target, s.Target)
 	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
 	}
 
 	//////
@@ -543,30 +547,6 @@ func (s *File) Create(ctx context.Context, id, target string, v any, prm *create
 		}
 	}
 
-	// Check if prm.Any is type of CreateAny.
-	if cA, ok := prm.Any.(*CreateAny); ok {
-		if cA.CreateIfNotExist {
-			// Extract directory from target which contains the full file path.
-			dir := filepath.Dir(target)
-
-			// Check if the directory exists.
-			if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
-				// Create the directory if it doesn't exist.
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-				}
-			}
-
-			// Check if the file already exists.
-			if _, err := os.Stat(target); errors.Is(err, fs.ErrNotExist) {
-				// Create the file if it doesn't exist.
-				if _, err := os.Create(target); err != nil {
-					return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-				}
-			}
-		}
-	}
-
 	//////
 	// Params initialization.
 	//////
@@ -591,6 +571,37 @@ func (s *File) Create(ctx context.Context, id, target string, v any, prm *create
 		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 	}
 
+	// Check if finalParam.Any is type of CreateAny.
+	if cA, ok := finalParam.Any.(*CreateAny); ok {
+		if cA.CreateIfNotExist {
+			// Extract directory from the resolved target which contains the
+			// full file path.
+			dir := filepath.Dir(trgt)
+
+			// Check if the directory exists.
+			if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+				// Create the directory if it doesn't exist.
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+				}
+			}
+
+			// Check if the file already exists.
+			if _, err := os.Stat(trgt); errors.Is(err, fs.ErrNotExist) {
+				// Create the file if it doesn't exist, closing the handle so
+				// it doesn't leak.
+				f, err := os.Create(trgt)
+				if err != nil {
+					return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+				}
+
+				if err := f.Close(); err != nil {
+					return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+				}
+			}
+		}
+	}
+
 	//////
 	// Create.
 	//////
@@ -613,9 +624,14 @@ func (s *File) Create(ctx context.Context, id, target string, v any, prm *create
 			s.GetCounterCreatedFailed(),
 		)
 	}
-	defer file.Close()
-
 	if err := shared.Encode(file, v); err != nil {
+		file.Close()
+
+		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+	}
+
+	// A failed close means the data may not have hit the disk — surface it.
+	if err := file.Close(); err != nil {
 		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 	}
 
@@ -732,9 +748,14 @@ func (s *File) Update(ctx context.Context, id, target string, v any, prm *update
 			s.GetCounterUpdatedFailed(),
 		)
 	}
-	defer file.Close()
-
 	if err := shared.Encode(file, v); err != nil {
+		file.Close()
+
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
+	}
+
+	// A failed close means the data may not have hit the disk — surface it.
+	if err := file.Close(); err != nil {
 		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
 	}
 
@@ -803,7 +824,9 @@ func New(ctx context.Context) (*File, error) {
 	// Singleton.
 	//////
 
+	singletonMutex.Lock()
 	singleton = storage
+	singletonMutex.Unlock()
 
 	return storage, nil
 }
@@ -814,14 +837,20 @@ func New(ctx context.Context) (*File, error) {
 
 // Get returns a setup storage, or set it up.
 func Get() storage.IStorage {
-	if singleton == nil {
+	singletonMutex.RLock()
+	s := singleton
+	singletonMutex.RUnlock()
+
+	if s == nil {
 		panic(fmt.Sprintf("%s %s not %s", Name, storage.Type, status.Initialized))
 	}
 
-	return singleton
+	return s
 }
 
 // Set sets the storage, primarily used for testing.
 func Set(s storage.IStorage) {
+	singletonMutex.Lock()
 	singleton = s
+	singletonMutex.Unlock()
 }

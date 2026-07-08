@@ -128,7 +128,7 @@ func TestNew_PingFailure_ClosesHandle(t *testing.T) {
 	beforeCloses := ctr.closes.Load()
 
 	// The counting driver's Ping always fails, so New must return an error.
-	storage, err := New(context.Background(), "counting://ignored")
+	storage, err := New(t.Context(), "counting://ignored")
 	if err == nil {
 		t.Fatalf("New: expected a ping-failure error, got nil (storage=%v)", storage)
 	}

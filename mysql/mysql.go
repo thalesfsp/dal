@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/doug-martin/goqu/v9"
 	// Import the mysql dialect for goqu.
@@ -44,7 +45,10 @@ import (
 const Name = "mysql"
 
 // Singleton.
-var singleton storage.IStorage
+var (
+	singleton      storage.IStorage
+	singletonMutex sync.RWMutex
+)
 
 // driverName is the database/sql driver `New` opens the client with. It
 // defaults to `Name` and exists as a test seam so the constructor's post-open
@@ -114,6 +118,10 @@ func (m *MySQL) createDB(ctx context.Context, name string) error {
 }
 
 func (m *MySQL) deleteTable(ctx context.Context, name string) error {
+	if err := shared.ValidateSQLIdentifier(name); err != nil {
+		return err
+	}
+
 	if _, err := m.
 		Client.
 		ExecContext(ctx, fmt.Sprintf("DROP TABLE %s", name)); err != nil {
@@ -124,6 +132,10 @@ func (m *MySQL) deleteTable(ctx context.Context, name string) error {
 }
 
 func (m *MySQL) createTable(ctx context.Context, name, description string) error {
+	if err := shared.ValidateSQLIdentifier(name); err != nil {
+		return err
+	}
+
 	sql := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s (
 		%s
@@ -198,6 +210,12 @@ func (m *MySQL) Count(ctx context.Context, target string, prm *count.Count, opti
 	}
 
 	if finalParam.Search == "" {
+		// trgt is interpolated into the statement — reject anything that
+		// isn't a plain identifier (SQL injection guard).
+		if err := shared.ValidateSQLIdentifier(trgt); err != nil {
+			return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
+		}
+
 		finalParam.Search = "SELECT COUNT(*) FROM " + trgt
 	}
 
@@ -554,6 +572,12 @@ func (m *MySQL) List(ctx context.Context, target string, v any, prm *list.List, 
 	}
 
 	if finalParam.Search == "" {
+		// trgt is interpolated into the statement — reject anything that
+		// isn't a plain identifier (SQL injection guard).
+		if err := shared.ValidateSQLIdentifier(trgt); err != nil {
+			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
+		}
+
 		finalParam.Search = "SELECT * FROM " + trgt
 	}
 
@@ -825,10 +849,21 @@ func (m *MySQL) Update(ctx context.Context, id, target string, v any, prm *updat
 		)
 	}
 
-	if _, err := m.Client.ExecContext(ctx, updateSQL, args...); err != nil {
+	res, err := m.Client.ExecContext(ctx, updateSQL, args...)
+	if err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
+			m.GetLogger(),
+			m.GetCounterUpdatedFailed(),
+		)
+	}
+
+	// Surface updates that matched nothing as 404, consistent with Retrieve.
+	if rowsAffected, err := res.RowsAffected(); err == nil && rowsAffected == 0 {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewHTTPError(http.StatusNotFound),
 			m.GetLogger(),
 			m.GetCounterUpdatedFailed(),
 		)
@@ -916,7 +951,7 @@ func New(ctx context.Context, dataSource string) (*MySQL, error) {
 
 	r := retrier.New(retrier.ExponentialBackoff(3, shared.TimeoutPing), nil)
 
-	if err := r.Run(func() error {
+	if err := r.RunCtx(ctx, func(ctx context.Context) error {
 		if err := client.Ping(); err != nil {
 			cE := customerror.NewFailedToError(
 				"ping",
@@ -945,7 +980,9 @@ func New(ctx context.Context, dataSource string) (*MySQL, error) {
 		return nil, customapm.TraceError(ctx, err, s.GetLogger(), nil)
 	}
 
+	singletonMutex.Lock()
 	singleton = storage
+	singletonMutex.Unlock()
 
 	success = true
 
@@ -958,14 +995,20 @@ func New(ctx context.Context, dataSource string) (*MySQL, error) {
 
 // Get returns a setup storage, or set it up.
 func Get() storage.IStorage {
-	if singleton == nil {
+	singletonMutex.RLock()
+	s := singleton
+	singletonMutex.RUnlock()
+
+	if s == nil {
 		panic(fmt.Sprintf("%s %s not %s", Name, storage.Type, status.Initialized))
 	}
 
-	return singleton
+	return s
 }
 
 // Set sets the storage, primarily used for testing.
 func Set(s storage.IStorage) {
+	singletonMutex.Lock()
 	singleton = s
+	singletonMutex.Unlock()
 }
