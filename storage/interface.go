@@ -10,7 +10,7 @@ import (
 	"github.com/thalesfsp/params/v2/list"
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
-	"github.com/thalesfsp/sypl"
+	"github.com/thalesfsp/sypl/v2"
 )
 
 //////
