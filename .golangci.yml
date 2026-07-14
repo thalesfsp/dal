@@ -1,151 +1,151 @@
-run:
-  timeout: 1m
-
+version: "2"
 linters:
-  enable-all: true
+  default: all
   disable:
+    # Carried forward from the v1 config (linters dal intentionally kept off).
+    - contextcheck
+    - depguard
+    - err113
+    - exhaustruct
+    - gochecknoglobals
     - godox
+    - interfacebloat
+    - ireturn
+    - lll
+    - mnd
+    - noctx
+    - perfsprint
+    - tagliatelle
+    - testifylint
     - varnamelen
     - wrapcheck
-    - exhaustivestruct
-    - exhaustruct
-    - tagliatelle
-    - contextcheck
-    - ireturn
-    - gomnd
-    - noctx
-    - gochecknoglobals
-    - lll
-    - interfacebloat
-    - depguard
-    - perfsprint
-    - testifylint
-    - wsl
-    - err113
-    - mnd
-  fast: false
-
-# Settings for specific linters
-linters-settings:
-  funlen:
-    lines: 250
-    statements: 70
-
-  cyclop:
-    skip-tests: true
-    max-complexity: 25
-    package-average: 0
-
-  wsl:
-    allow-separated-leading-comment: true
-    allow-trailing-comment: true
-
-  revive:
-    ignore-generated-header: true
+    - wsl # deprecated in v2, superseded by wsl_v5; dal disabled wsl globally in v1
+    # New-in-v2 linters disabled during the v1 -> v2 migration. origin/main is
+    # green under golangci-lint v1.64.8, so these fired only because v2 added
+    # (or renamed) them; none were enforced by v1. They are opinionated and would
+    # churn otherwise-untouched files, so disabling them weakens no v1 check.
+    - funcorder # new in v2: opinionated method-ordering
+    - noinlineerr # new in v2: inline `if err := ...; err != nil` is dal house style
+    - wsl_v5 # successor to wsl, which dal disabled globally in v1
+    - godoclint # new in v2: opinionated godoc rules (e.g. one package doc per package)
+    - unqueryvet # new in v2: flags `SELECT *`, which this generic DAL builds by design
+  settings:
+    cyclop:
+      max-complexity: 25
+      package-average: 0
+    funlen:
+      lines: 250
+      statements: 70
+    revive:
+      rules:
+        - name: unused-parameter
+          disabled: true
+    wsl:
+      allow-trailing-comment: true
+      allow-separated-leading-comment: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      - name: "unused-parameter"
-        disabled: true
-
-issues:
-  exclude-rules:
-    # aws-sdk-go v1 is deprecated upstream; migrating the s3/dynamodb storages
-    # to aws-sdk-go-v2 is a separate, breaking effort.
-    - linters:
-        - staticcheck
-      text: "SA1019: .*aws-sdk-go is deprecated"
-
-    - path: cmd/
-      linters:
-        - gochecknoinits
-        - gomnd
-        - forbidigo
-        - exhaustruct
-        - exhaustivestruct
-        - staticcheck
-        - varnamelen
-        - wsl
-        - nestif
-
-    - path: postgres.go
-      linters:
-        - gci
-
-    - path: auth.go
-      linters:
-        - unused
-    - path: example_test.go
-      linters:
-        - lll
-
-    - path: http/
-      linters:
-        - unparam
-        - nlreturn
-
-    - path: mongo*
-      linters:
-        - govet
-
-    - path: test.go
-      linters:
-        - testpackage
-        - cyclop
-
-    - path: sqlite/sqlite.go
-      linters:
-        - gci
-
-    - path: mysql/mysql.go
-      linters:
-        - gci
-        - unused
-
-    - path: _test\.go
-      linters:
-        - funlen
-        - scopelint
-        - wsl
-        - containedctx
-        - nlreturn
-        - gocognit
-        - goerr113
-        - paralleltest
-        - lll
-        - govet
-        - ifshort
-        - maligned
-        - maintidx
-        - goconst
-
-    - path: doc.go
-      linters:
-        - lll
-
-    - path: example_test.go
-      linters:
-        - nosnakecase
-
-    - path: resource.go
-      linters:
-        - wsl
-
-    - text: "O_WRONLY|O_RDWR|O_CREATE|O_TRUNC|O_APPEND"
-      linters:
-        - nosnakecase
-
-    - linters:
-        - lll
-      source: "json:"
-
-    - linters:
-        - gocritic
-        - godot
-        - lll
-        - wsl
-      source: "//////"
-
-    - linters:
-        - gocritic
-        - godot
-        - lll
-      source: "//"
+      - linters:
+          - staticcheck
+        text: 'SA1019: .*aws-sdk-go is deprecated'
+      - linters:
+          - exhaustivestruct
+          - exhaustruct
+          - forbidigo
+          - gochecknoinits
+          - mnd
+          - nestif
+          - staticcheck
+          - varnamelen
+          - wsl
+        path: cmd/
+      - linters:
+          - unused
+        path: auth.go
+      - linters:
+          - lll
+        path: example_test.go
+      - linters:
+          - nlreturn
+          - unparam
+        path: http/
+      - linters:
+          - govet
+        path: mongo*
+      - linters:
+          - cyclop
+          - testpackage
+        path: test.go
+      - linters:
+          - unused
+        path: mysql/mysql.go
+      - linters:
+          - containedctx
+          - err113
+          - funlen
+          - gocognit
+          - goconst
+          - govet
+          - ifshort
+          - lll
+          - maintidx
+          - maligned
+          - nlreturn
+          - paralleltest
+          - scopelint
+          - wsl
+        path: _test\.go
+      - linters:
+          - lll
+        path: doc.go
+      - linters:
+          - nosnakecase
+        path: example_test.go
+      - linters:
+          - wsl
+        path: resource.go
+      - linters:
+          - nosnakecase
+        text: O_WRONLY|O_RDWR|O_CREATE|O_TRUNC|O_APPEND
+      - linters:
+          - lll
+        source: 'json:'
+      - linters:
+          - gocritic
+          - godot
+          - lll
+          - wsl
+        source: //////
+      - linters:
+          - gocritic
+          - godot
+          - lll
+        source: //
+      - linters:
+          - cyclop
+        path: (.+)_test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+      - postgres.go
+      - sqlite/sqlite.go
+      - mysql/mysql.go

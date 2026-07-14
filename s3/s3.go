@@ -1002,7 +1002,7 @@ func RetrieveSigned(
 	if !ok {
 		// If the assertion failed, return an error.
 		//
-		//nolint:goerr113
+		//nolint:err113 // goerr113 was renamed err113 in golangci-lint v2
 		return "", customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(

@@ -16,7 +16,7 @@ func ParseToStruct(from, to any) error {
 
 // Flatten2D takes a 2D slice and returns a 1D slice containing all the elements.
 //
-//nolint:gosimple
+//nolint:staticcheck // S1011: explicit nested loop kept intentionally (gosimple merged into staticcheck in golangci-lint v2)
 func Flatten2D[T any](data [][]T) []T {
 	var result []T
 
