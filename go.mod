@@ -21,7 +21,7 @@ require (
 	github.com/thalesfsp/customerror v1.2.9
 	github.com/thalesfsp/params/v2 v2.0.0
 	github.com/thalesfsp/status v1.0.22
-	github.com/thalesfsp/sypl v1.19.20
+	github.com/thalesfsp/sypl/v2 v2.0.0
 	github.com/thalesfsp/validation v0.0.3
 	go.elastic.co/apm v1.15.0
 	go.mongodb.org/mongo-driver v1.17.9
@@ -65,6 +65,7 @@ require (
 	github.com/santhosh-tekuri/jsonschema v1.2.4 // indirect
 	github.com/thalesfsp/configurer v1.3.33 // indirect
 	github.com/thalesfsp/randomness v0.0.9 // indirect
+	github.com/thalesfsp/sypl v1.19.20 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
