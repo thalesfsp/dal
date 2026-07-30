@@ -60,7 +60,11 @@ type S3 struct {
 	Client *s3.S3 `json:"-" validate:"required,structonly"`
 
 	// Config is the S3 configuration.
-	Config *Config `json:"-"`
+	//
+	// Skipped by the validator: it dives into untagged nested structs, and an
+	// aws.Config holds live SDK state (credentials guarded by a mutex, which
+	// background SDK goroutines write) that must not be read reflectively.
+	Config *Config `json:"-" validate:"-"`
 
 	// Target allows to set a static target. If it is empty, the target will be
 	// dynamic - the one set at the operation (count, create, delete, etc) time.
