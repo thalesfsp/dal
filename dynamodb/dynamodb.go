@@ -600,9 +600,11 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 	// Query preparation.
 	//////
 
+	// NOTE: Do NOT set Select=COUNT here: List must return the items
+	// themselves. (Select=COUNT makes DynamoDB omit Items entirely, and it is
+	// invalid when combined with a ProjectionExpression.)
 	scanInput := &dynamodb.ScanInput{
 		TableName: aws.String(trgt),
-		Select:    aws.String(dynamodb.SelectCount),
 	}
 
 	// Fields projection
@@ -714,7 +716,7 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 		}
 
 		lastEvaluatedKey = result.LastEvaluatedKey
-		if lastEvaluatedKey == nil {
+		if len(lastEvaluatedKey) == 0 {
 			break
 		}
 	}
