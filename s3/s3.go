@@ -57,7 +57,7 @@ type S3 struct {
 	Bucket string `json:"bucket" validate:"required,gt=0"`
 
 	// Client is the S3 client.
-	Client *s3.S3 `json:"-" validate:"required"`
+	Client *s3.S3 `json:"-" validate:"required,structonly"`
 
 	// Config is the S3 configuration.
 	Config *Config `json:"-"`
