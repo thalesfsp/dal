@@ -45,9 +45,9 @@ var m1 = &Mock{
 	},
 
 	MockUpdate: func(ctx context.Context, id, target string, v any, prm *update.Update, options ...Func[*update.Update]) error {
-		result := `{"k": "mock1"}`
-
-		return shared.Unmarshal([]byte(result), v)
+		// v is the update payload (an input, possibly a non-pointer) —
+		// nothing to write back; a successful update just returns nil.
+		return nil
 	},
 
 	MockGetName: func() string {
@@ -82,9 +82,8 @@ var m2 = &Mock{
 	},
 
 	MockUpdate: func(ctx context.Context, id, target string, v any, prm *update.Update, options ...Func[*update.Update]) error {
-		result := `{"k": "mock2"}`
-
-		return shared.Unmarshal([]byte(result), v)
+		// Same as m1: the payload is an input; success is returning nil.
+		return nil
 	},
 
 	MockGetName: func() string {

@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - [ ] Create and Update should allow to pass more than one object per time (Bulk Create and Update)
 
+## [Unreleased]
+### Fixed
+- `internal/shared.Unmarshal` passed `&v` (the address of its `any`
+  parameter) to `json.Unmarshal`, so a non-pointer destination decoded into
+  the interface box and returned success while the caller's value stayed
+  untouched. It now passes `v` through, and such calls fail loudly.
+- `file.Delete` returned early when the file was already gone, skipping the
+  post-hook, the debug log and the success counter — an idempotent delete now
+  runs the whole path.
+- `file.Count` and `file.List` returned `0`/`[]` for a target directory that
+  does not exist (`fs.Glob` yields no matches and no error). Both now stat the
+  target first and surface the failure.
+- `sftp.List` ignored `list.List.Search` despite documenting it — it now
+  applies the glob, matching `sftp.Count`.
+- `sftp.Create` reported write failures under the *update* operation label
+  (copy-paste from `Update`).
+
+### Added
+- `sftp.Close` releases the SSH transport as well as the SFTP channel; the
+  adapter retains it as `SFTP.Conn`. Closing only `Client` left the TCP+SSH
+  session open for the lifetime of the process.
+- Offline test suites for every remaining adapter — no Docker, no network:
+  an in-process SSH+SFTP server, a RESP2 fake for redis, a mongo mock
+  deployment, httptest-based Elasticsearch/S3/DynamoDB endpoints, and the
+  mysql/postgres driver seam pointed at sqlite. Together with the storage
+  core, `internal/*`, memory, file and sqlite suites, coverage of the module
+  moved from roughly 25% to over 90%.
+- `SUGGESTIONS.md` — improvements, candidate new adapters, and the design
+  changes found during the audit that are out of scope for a fix pass.
+
+### Changed
+- `memory.List` builds its JSON payload with a `strings.Builder` instead of
+  repeated string concatenation (was O(n²) in the number of matched keys).
+
 ## [2.2.0] - 2026-07-05
 ### Changed
 - All dependencies upgraded to their latest Go 1.24-compatible releases

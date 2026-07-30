@@ -465,9 +465,16 @@ func (s *Memory) List(ctx context.Context, target string, v any, prm *list.List,
 		pattern = "*"
 	}
 
-	items := `{"items":[`
+	// Build the JSON document with a Builder: naive string concatenation is
+	// O(n²) as every append re-copies the accumulated payload.
+	var items strings.Builder
 
-	var matchErr error
+	items.WriteString(`{"items":[`)
+
+	var (
+		matchErr error
+		first    = true
+	)
 
 	s.client.Range(func(key, value interface{}) bool {
 		matched, err := keyMatches(pattern, key)
@@ -482,7 +489,13 @@ func (s *Memory) List(ctx context.Context, target string, v any, prm *list.List,
 		}
 
 		if b, ok := value.([]byte); ok {
-			items += string(b) + ","
+			if !first {
+				items.WriteByte(',')
+			}
+
+			items.Write(b)
+
+			first = false
 		}
 
 		return true
@@ -492,12 +505,9 @@ func (s *Memory) List(ctx context.Context, target string, v any, prm *list.List,
 		return customapm.TraceError(ctx, matchErr, s.GetLogger(), s.GetCounterListedFailed())
 	}
 
-	// Remove the last comma.
-	items = strings.TrimSuffix(items, ",")
+	items.WriteString(`]}`)
 
-	items += `]}`
-
-	if err := shared.Unmarshal([]byte(items), v); err != nil {
+	if err := shared.Unmarshal([]byte(items.String()), v); err != nil {
 		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
 	}
 
