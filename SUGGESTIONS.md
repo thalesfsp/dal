@@ -124,7 +124,24 @@ Ranked by how much they'd add relative to what already exists:
   into `IStorage` would misrepresent their semantics. NATS **JetStream KV**
   is the exception and would fit.
 
-## 8. Reduce the per-adapter boilerplate
+## 8. `dynamodb`'s functional options are not wired to its constructors
+
+`WithPrimaryKey`, `WithTarget` and `WithDynamicTarget` are exported and each
+returns a `func(*DynamoDB)`, but none of `New`, `NewWithTable` or
+`NewWithDynamicTable` takes a variadic options parameter. They can only be
+used by constructing the storage first and then applying the option to the
+returned instance by hand, which is not how a `With…` API reads.
+
+`PrimaryKey` in particular is hardcoded to `"id"` by the constructors, so a
+table keyed on anything else needs the post-hoc call to be usable at all.
+
+**Suggested change:** accept `...func(*DynamoDB)` on the three constructors
+and apply the options before `validation.Validate`, so an alternate primary
+key is set before the struct is checked. That is backwards compatible —
+existing calls keep working — and makes the exported helpers do what their
+names promise.
+
+## 9. Reduce the per-adapter boilerplate
 
 Each of the six operations in each of the eleven adapters repeats the same
 ~40-line preamble: start an APM span, build options, apply option funcs,

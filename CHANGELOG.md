@@ -11,6 +11,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Fixed
+- Every adapter's `New` handed its whole storage struct to the validator,
+  which descends into nested structs by default — so construction walked the
+  live driver client (a `mongo.Client`, a `redis.Client`, a `sqlx.DB` pool,
+  an `ssh.Client`, an `aws.Config`) reading fields the driver's own
+  background goroutines write. The race detector caught it on `s3`, where the
+  SDK's credential `singleflight` goroutine mutates state validation was
+  reading. Client fields are now `required,structonly` and the config fields
+  holding live state are skipped, so the tag means what it always intended:
+  must not be nil.
+- `dynamodb.List` set `Select: COUNT` on its Scan input, which makes DynamoDB
+  omit `Items` entirely — the operation could never return data, and the
+  setting is invalid alongside a projection. Its pagination loop compared
+  `LastEvaluatedKey` against nil rather than checking length.
+- `elasticsearch.Count` decoded the search response without first checking it
+  for an ES-side error, as every other operation does. An error response
+  carries an `error` envelope and no `hits`, so a rejected query came back as
+  a successful count of zero.
+- `elasticsearch.List` asserted `hits.hits` in one chained type assertion, so
+  a response missing `hits`, or carrying a non-object there, panicked instead
+  of returning the "unexpected type" error already written for that case.
+- `mysql.Create` and `postgres.Create` returned a failing post-hook's error
+  raw instead of routing it through `customapm.TraceError`, so a failed
+  create skipped APM's span-failure marking and left the created-failed
+  counter untouched — it looked like a success in metrics. `sqlite.Create`
+  had the same bug.
+- `mongodb.New` reported ping failures as a bare `context deadline exceeded`:
+  `retrier.RunCtx` returns the context's error when the deadline fires during
+  a backoff sleep, discarding the attempt's cause. The last one is now joined
+  with it.
+- `s3.Create` had no `[]byte` case, so raw bytes fell through to the JSON
+  branch and were stored base64-encoded. `Update` already handled them.
 - `internal/shared.Unmarshal` passed `&v` (the address of its `any`
   parameter) to `json.Unmarshal`, so a non-pointer destination decoded into
   the interface box and returned success while the caller's value stayed
@@ -30,12 +61,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sftp.Close` releases the SSH transport as well as the SFTP channel; the
   adapter retains it as `SFTP.Conn`. Closing only `Client` left the TCP+SSH
   session open for the lifetime of the process.
-- Offline test suites for every remaining adapter — no Docker, no network:
-  an in-process SSH+SFTP server, a RESP2 fake for redis, a mongo mock
-  deployment, httptest-based Elasticsearch/S3/DynamoDB endpoints, and the
-  mysql/postgres driver seam pointed at sqlite. Together with the storage
-  core, `internal/*`, memory, file and sqlite suites, coverage of the module
-  moved from roughly 25% to over 90%.
+- Offline test suites for every package — no Docker, no network, no new
+  dependencies. Every package is now at or above 90% statement coverage
+  (previously as low as 0%), all running under `-race`:
+
+  | Package | Before | After |
+  |---|---|---|
+  | `storage` | 50.2% | 99.5% |
+  | `internal/logging` | 0% | 100% |
+  | `internal/shared` | 39.4% | 95.7% |
+  | `internal/customapm` | 69.8% | 95.3% |
+  | `elasticsearch` | 14.5% | 94.7% |
+  | `sqlite` | 64.2% | 93.8% |
+  | `redis` | 0% | 93.5% |
+  | `postgres` | 6.6% | 93.4% |
+  | `mysql` | 6.4% | 93.2% |
+  | `s3` | 0% | 93.1% |
+  | `dynamodb` | 18.4% | 92.4% |
+  | `sftp` | 4.3% | 92.0% |
+  | `file` | 63.5% | 91.9% |
+  | `memory` | 73.3% | 91.7% |
+  | `mongodb` | 0% | 90.7% |
+
+  The backends are faked in-process: an SSH server with the SFTP subsystem
+  attached, a RESP2 server implementing exactly the commands the redis
+  adapter sends, a mongo mock deployment driving the real driver, an
+  Elasticsearch server with an in-memory index emulator, S3 and DynamoDB
+  served through a custom transport that never opens a socket, and the
+  mysql/postgres `driverName` seams pointed at sqlite.
 - `SUGGESTIONS.md` — improvements, candidate new adapters, and the design
   changes found during the audit that are out of scope for a fix pass.
 
