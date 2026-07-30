@@ -13,9 +13,29 @@ This package implements a generic storage interface that abstracts away the comp
 - Extensible Architecture: Easy to implement new storage backends
 - Pre/Post Operation Hooks: Customizable hooks for operation lifecycle management
 - Type-Safe Operations: Generic type support for type-safe data handling
-- Redis Implementation: Full featured Redis storage implementation included
 - Robust Error Handling: Comprehensive error handling with customer error types
 - Logging Support: Integrated logging system with different log levels
+
+## Storages
+
+| Package         | Backend                | Notes                                                       |
+| --------------- | ---------------------- | ----------------------------------------------------------- |
+| `bolt`          | bbolt                  | Embedded, persistent, single file. Holds an exclusive lock.  |
+| `dynamodb`      | AWS DynamoDB           |                                                              |
+| `elasticsearch` | Elasticsearch          |                                                              |
+| `file`          | Local filesystem       | One file per document.                                       |
+| `memory`        | In-process map         | Volatile. Cleared when the process exits.                    |
+| `mongodb`       | MongoDB                |                                                              |
+| `mysql`         | MySQL                  |                                                              |
+| `postgres`      | PostgreSQL             |                                                              |
+| `redis`         | Redis                  |                                                              |
+| `s3`            | AWS S3                 |                                                              |
+| `sftp`          | SFTP                   |                                                              |
+| `sqlite`        | SQLite                 |                                                              |
+
+`bolt` and `memory` need no external service, so their packages carry runnable
+examples. Every other storage is exercised by integration tests that require a
+running backend.
 
 ## Install
 

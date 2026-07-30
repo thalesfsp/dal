@@ -22,6 +22,7 @@ require (
 	github.com/thalesfsp/sypl/v2 v2.0.0
 	github.com/thalesfsp/validation v0.0.3
 	go.elastic.co/apm v1.15.0
+	go.etcd.io/bbolt v1.5.0
 	go.mongodb.org/mongo-driver v1.17.9
 	golang.org/x/crypto v0.54.0
 	golang.org/x/text v0.40.0

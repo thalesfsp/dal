@@ -58,6 +58,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (copy-paste from `Update`).
 
 ### Added
+- `bolt` storage, backed by bbolt: an embedded, persistent key-value store
+  needing no external service. It fills the gap between `memory` (volatile)
+  and `file` (one file per document). Buckets map to targets and are created
+  on write; a missing bucket is an error on read rather than an empty result,
+  so a typo in a target cannot masquerade as an empty store. `Delete` stays
+  idempotent on a missing bucket, matching `file`, `sftp` and `memory`.
+  `List` walks bbolt's cursor, which yields keys in byte order, making
+  `Limit` meaningful — most non-SQL adapters ignore it.
+  `Close` matters more here than elsewhere: bbolt holds an exclusive lock on
+  the database file, so a leaked handle blocks every later `Open` of the same
+  path.
+- Runnable examples for `bolt` and `memory`, checked by `go test` against
+  their declared output. These are the only two storages that need no live
+  backend, and so the only two where an example can execute.
 - `sftp.Close` releases the SSH transport as well as the SFTP channel; the
   adapter retains it as `SFTP.Conn`. Closing only `Client` left the TCP+SSH
   session open for the lifetime of the process.

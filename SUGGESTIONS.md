@@ -64,11 +64,22 @@ adapter support is uneven:
 |---|---|---|---|---|
 | memory, file, sftp | yes | no | no | no |
 | redis | via SCAN MATCH | no | no | no |
+| bolt | yes | Limit only | no | no |
 | sql (mysql/postgres/sqlite) | yes | yes | yes | yes |
 | elasticsearch, mongodb, dynamodb | yes | partial | partial | partial |
 
 The doc comments do not distinguish the supported from the ignored, so a
 caller setting `Limit` on `memory` gets everything back with no error.
+
+`Sort` is the sharpest edge: five of the twelve adapters accept it and
+discard it. Backends with no inherent order cannot honor it without buffering
+and sorting the whole result set, which is a real cost the caller did not ask
+for — but silently returning unordered data is worse, because swapping
+`postgres` for `redis` behind the interface changes results with no signal.
+`bolt` is a middle case worth noting: its cursor walks keys in byte order, so
+its `List` is *incidentally* ordered by id, and `Limit` is meaningful for the
+same reason. That is a property of the backend, not an implementation of
+`Sort`, and it should not be relied on as one.
 
 **Suggested change:** either honor them uniformly (they are all cheap to
 implement for the in-process adapters) or return an explicit
@@ -95,10 +106,17 @@ N round-trips and one.
 
 Ranked by how much they'd add relative to what already exists:
 
+**Shipped:**
+- **bbolt** — implemented as the `bolt` package. Buckets map to targets, and
+  the database is a single file guarded by an exclusive lock, so `Close` is a
+  correctness requirement rather than hygiene: a leaked handle blocks every
+  later `Open` of the same path. Needing no external service, it is the one
+  adapter besides `memory` whose examples can run in CI.
+  **BadgerDB** remains open as an alternative with a different trade-off —
+  an LSM tree tuned for write-heavy loads, where bbolt's B+tree favours
+  reads.
+
 **High value — new capability:**
-- **BadgerDB or bbolt** — an embedded, *persistent* key-value store. Today
-  the only local options are `memory` (volatile) and `file` (one document per
-  file). Zero external infrastructure, so it can be fully tested in CI.
 - **OpenSearch** — the ES fork, API-compatible enough to be a thin variant of
   the existing `elasticsearch` adapter, and a common requirement for AWS
   users (`opensearchproject/opensearch-go`).
