@@ -67,6 +67,18 @@ func TestNew(t *testing.T) {
 				t.Fatal("str or str.Client is nil")
 			}
 
+			// Storage metrics are process-global, keyed by storage name, so every
+			// test in this package accumulates into the same counters. The absolute
+			// assertions at the end of this test need a known baseline.
+			shared.ResetCounters(
+				str.GetCounterCounted(), str.GetCounterCountedFailed(),
+				str.GetCounterCreated(), str.GetCounterCreatedFailed(),
+				str.GetCounterDeleted(), str.GetCounterDeletedFailed(),
+				str.GetCounterListed(), str.GetCounterListedFailed(),
+				str.GetCounterRetrieved(), str.GetCounterRetrievedFailed(),
+				str.GetCounterUpdated(), str.GetCounterUpdatedFailed(),
+			)
+
 			// Ensures that document will be deleted after the test even if it
 			// fails.
 			defer func() {

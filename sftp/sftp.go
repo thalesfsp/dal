@@ -55,7 +55,12 @@ type (
 type SFTP struct {
 	*storage.Storage
 
-	Client *sftp.Client `json:"-" validate:"required"`
+	Client *sftp.Client `json:"-" validate:"required,structonly"`
+
+	// Conn is the underlying SSH transport carrying the SFTP subsystem.
+	// Client.Close only tears down the SFTP channel, so callers need this to
+	// release the TCP+SSH session — see Close.
+	Conn *ssh.Client `json:"-" validate:"required,structonly"`
 
 	// Target allows to set a static target. If it is empty, the target will be
 	// dynamic - the one set at the operation (count, create, delete, etc) time.
@@ -523,8 +528,27 @@ func (s *SFTP) List(ctx context.Context, target string, v any, prm *list.List, o
 
 	keys := ResponseListKeys{[]string{}}
 
+	// The documented contract is that Search filters the listing (Count
+	// already honors it). An empty search means match-all.
+	pattern := finalParam.Search
+	if pattern == "" {
+		pattern = "*"
+	}
+
 	for _, file := range files {
-		if !file.IsDir() {
+		if file.IsDir() {
+			continue
+		}
+
+		matched, err := path.Match(pattern, file.Name())
+		if err != nil {
+			return customapm.TraceError(ctx, customerror.NewFailedToError(
+				storage.OperationList.String(),
+				customerror.WithError(err),
+			), s.GetLogger(), s.GetCounterListedFailed())
+		}
+
+		if matched {
 			keys.Keys = append(keys.Keys, file.Name())
 		}
 	}
@@ -655,7 +679,7 @@ func (s *SFTP) Create(ctx context.Context, id, target string, v any, prm *create
 	if _, err := dstFile.Write(b); err != nil {
 		return "", customapm.TraceError(
 			ctx,
-			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
+			customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
 			s.GetLogger(),
 			s.GetCounterCreatedFailed(),
 		)
@@ -894,6 +918,7 @@ func New(ctx context.Context, addr string, cfg *Config, options ...Option) (*SFT
 		Storage: s,
 
 		Client: client,
+		Conn:   conn,
 	}
 
 	if err := validation.Validate(storage); err != nil {
@@ -907,6 +932,31 @@ func New(ctx context.Context, addr string, cfg *Config, options ...Option) (*SFT
 	singletonMutex.Unlock()
 
 	return storage, nil
+}
+
+// Close releases the SFTP client and the SSH transport underneath it.
+// Closing only the client would leave the TCP+SSH session open for the
+// lifetime of the process.
+func (s *SFTP) Close() error {
+	var errs []error
+
+	if s.Client != nil {
+		if err := s.Client.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if s.Conn != nil {
+		if err := s.Conn.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if len(errs) > 0 {
+		return customerror.NewFailedToError("close", customerror.WithError(errors.Join(errs...)))
+	}
+
+	return nil
 }
 
 //////

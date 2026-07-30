@@ -5,6 +5,7 @@
 package shared
 
 import (
+	"expvar"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -137,6 +138,20 @@ func CreateHTTPTestServer(
 	}))
 
 	return testServer
+}
+
+// ResetCounters zeroes the given metrics.
+//
+// Storage metrics are process-global, keyed by storage name, so every test in
+// a package accumulates into the same counters. A test that asserts absolute
+// counter values must therefore start from a known baseline — without one, its
+// expectations change the moment any other test touches the same adapter.
+func ResetCounters(counters ...*expvar.Int) {
+	for _, c := range counters {
+		if c != nil {
+			c.Set(0)
+		}
+	}
 }
 
 // ErrorContains checks if an error contains a string.

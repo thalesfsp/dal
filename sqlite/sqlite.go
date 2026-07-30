@@ -65,7 +65,7 @@ type SQLite struct {
 	*storage.Storage
 
 	// Client is the postgres client.
-	Client *sqlx.DB `json:"-" validate:"required"`
+	Client *sqlx.DB `json:"-" validate:"required,structonly"`
 
 	// Config is the postgres configuration.
 	Config *Config `json:"-"`
@@ -712,7 +712,7 @@ func (p *SQLite) Create(ctx context.Context, id, target string, v any, prm *crea
 
 	if o.PostHookFunc != nil {
 		if err := o.PostHookFunc(ctx, p, id, trgt, v, finalParam); err != nil {
-			return "", err
+			return "", customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCreatedFailed())
 		}
 	}
 

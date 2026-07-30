@@ -55,7 +55,7 @@ type ElasticSearch struct {
 	*storage.Storage
 
 	// Client is the ElasticSearch client.
-	Client *elasticsearch.Client `json:"-" validate:"required"`
+	Client *elasticsearch.Client `json:"-" validate:"required,structonly"`
 
 	// Config is the ElasticSearch configuration.
 	Config Config `json:"-"`
@@ -329,6 +329,13 @@ func (es *ElasticSearch) Count(ctx context.Context, target string, prm *count.Co
 	}
 
 	defer res.Body.Close()
+
+	// An ES error response carries an `error` envelope and no `hits`, so
+	// decoding it without this check yields a silent, plausible-looking
+	// count of 0.
+	if err := checkResponseIsError(res); err != nil {
+		return 0, customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCountedFailed())
+	}
 
 	// Parse the response.
 	var mapResp map[string]interface{}
@@ -755,7 +762,19 @@ func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *li
 
 	hits := []any{}
 
-	mapHits, ok := mapResp["hits"].(map[string]interface{})["hits"].([]interface{})
+	// Assert in two checked steps: chaining them panics outright when `hits`
+	// is absent or not an object.
+	hitsField, ok := mapResp["hits"].(map[string]interface{})
+	if !ok {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewFailedToError("unexpected type for 'hits'", customerror.WithField("hits", mapResp["hits"])),
+			es.GetLogger(),
+			es.GetCounterListedFailed(),
+		)
+	}
+
+	mapHits, ok := hitsField["hits"].([]interface{})
 	if !ok {
 		return customapm.TraceError(
 			ctx,

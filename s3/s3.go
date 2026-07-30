@@ -57,10 +57,14 @@ type S3 struct {
 	Bucket string `json:"bucket" validate:"required,gt=0"`
 
 	// Client is the S3 client.
-	Client *s3.S3 `json:"-" validate:"required"`
+	Client *s3.S3 `json:"-" validate:"required,structonly"`
 
 	// Config is the S3 configuration.
-	Config *Config `json:"-"`
+	//
+	// Skipped by the validator: it dives into untagged nested structs, and an
+	// aws.Config holds live SDK state (credentials guarded by a mutex, which
+	// background SDK goroutines write) that must not be read reflectively.
+	Config *Config `json:"-" validate:"-"`
 
 	// Target allows to set a static target. If it is empty, the target will be
 	// dynamic - the one set at the operation (count, create, delete, etc) time.
@@ -643,6 +647,11 @@ func (s *S3) Create(ctx context.Context, id, target string, v any, prm *create.C
 	case string:
 		// Set the body of the S3 upload request to the body reader.
 		uploadInput.Body = bytes.NewReader([]byte(content))
+
+	case []byte:
+		// Raw bytes are uploaded as-is (mirrors Update; without this case they
+		// would be JSON-marshaled into a base64 string).
+		uploadInput.Body = bytes.NewReader(content)
 
 	default:
 		// If the content is neither a file nor a string, assume it's a struct and marshal it to JSON.

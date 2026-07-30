@@ -61,10 +61,18 @@ type DynamoDB struct {
 	*storage.Storage
 
 	// Client is the DynamoDB client.
-	Client *dynamodb.DynamoDB `json:"-" validate:"required"`
+	//
+	// structonly: skips validating *into* the client's fields (only checks
+	// non-nilness) - same reasoning as Config below applies to any live SDK
+	// state reachable from it.
+	Client *dynamodb.DynamoDB `json:"-" validate:"required,structonly"`
 
 	// Config is the DynamoDB configuration.
-	Config Config `json:"-"`
+	//
+	// Skipped by the validator: it dives into untagged nested structs, and an
+	// aws.Config holds live SDK state (credentials guarded by a mutex, which
+	// background SDK goroutines write) that must not be read reflectively.
+	Config Config `json:"-" validate:"-"`
 
 	// Region is the AWS region.
 	Region string `json:"region" validate:"required"`
@@ -600,9 +608,11 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 	// Query preparation.
 	//////
 
+	// NOTE: Do NOT set Select=COUNT here: List must return the items
+	// themselves. (Select=COUNT makes DynamoDB omit Items entirely, and it is
+	// invalid when combined with a ProjectionExpression.)
 	scanInput := &dynamodb.ScanInput{
 		TableName: aws.String(trgt),
-		Select:    aws.String(dynamodb.SelectCount),
 	}
 
 	// Fields projection
@@ -714,7 +724,7 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 		}
 
 		lastEvaluatedKey = result.LastEvaluatedKey
-		if lastEvaluatedKey == nil {
+		if len(lastEvaluatedKey) == 0 {
 			break
 		}
 	}

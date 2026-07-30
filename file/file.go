@@ -123,6 +123,15 @@ func (s *File) Count(ctx context.Context, target string, prm *count.Count, optio
 		}
 	}
 
+	// fs.Glob on a nonexistent directory silently yields zero matches — a
+	// missing target must be an error, not a plausible-looking count of 0.
+	if _, err := os.Stat(trgt); err != nil {
+		return 0, customapm.TraceError(ctx, customerror.NewFailedToError(
+			storage.OperationCount.String(),
+			customerror.WithError(err),
+		), s.GetLogger(), s.GetCounterCountedFailed())
+	}
+
 	dir := os.DirFS(trgt)
 
 	matches, err := fs.Glob(dir, finalParam.Search)
@@ -231,12 +240,10 @@ func (s *File) Delete(ctx context.Context, id, target string, prm *delete.Delete
 		}
 	}
 
-	// Delete a file in the dir.
-	if err := os.Remove(trgt); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-
+	// Delete a file in the dir. A missing file is treated as an idempotent,
+	// successful delete — but it must still run the post-hook, logging, and
+	// success metric below, so don't return early.
+	if err := os.Remove(trgt); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(
@@ -469,6 +476,15 @@ func (s *File) List(ctx context.Context, target string, v any, prm *list.List, o
 	}
 
 	keys := ResponseListKeys{[]string{}}
+
+	// Same rationale as Count: a missing directory must surface as an error
+	// instead of an empty-but-plausible listing.
+	if _, err := os.Stat(trgt); err != nil {
+		return customapm.TraceError(ctx, customerror.NewFailedToError(
+			storage.OperationList.String(),
+			customerror.WithError(err),
+		), s.GetLogger(), s.GetCounterListedFailed())
+	}
 
 	dir := os.DirFS(trgt)
 

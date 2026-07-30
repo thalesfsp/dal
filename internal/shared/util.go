@@ -60,7 +60,11 @@ func SliceContains(source []string, text string) bool {
 
 // Unmarshal with custom error.
 func Unmarshal(data []byte, v any) error {
-	if err := json.Unmarshal(data, &v); err != nil {
+	// Pass v through as-is: wrapping it as &v (address of the interface)
+	// would make json.Unmarshal decode into the interface box, silently
+	// succeeding on non-pointer destinations while the caller's value stays
+	// untouched.
+	if err := json.Unmarshal(data, v); err != nil {
 		return customerror.NewFailedToError("to unmarshal",
 			customerror.WithError(err),
 		)
