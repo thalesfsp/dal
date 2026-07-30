@@ -55,7 +55,7 @@ type ElasticSearch struct {
 	*storage.Storage
 
 	// Client is the ElasticSearch client.
-	Client *elasticsearch.Client `json:"-" validate:"required"`
+	Client *elasticsearch.Client `json:"-" validate:"required,structonly"`
 
 	// Config is the ElasticSearch configuration.
 	Config Config `json:"-"`

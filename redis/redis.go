@@ -48,10 +48,12 @@ type Redis struct {
 	*storage.Storage
 
 	// Client is the Redis client.
-	Client *redis.Client `json:"-" validate:"required"`
+	Client *redis.Client `json:"-" validate:"required,structonly"`
 
 	// Config is the Redis configuration.
-	Config *Config `json:"-"`
+	// Skipped by the validator: it dives into untagged nested structs, and
+	// this config holds live client state that background goroutines write.
+	Config *Config `json:"-" validate:"-"`
 
 	// Target allows to set a static target. If it is empty, the target will be
 	// dynamic - the one set at the operation (count, create, delete, etc) time.

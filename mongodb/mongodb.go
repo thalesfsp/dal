@@ -52,10 +52,12 @@ type MongoDB struct {
 	*storage.Storage
 
 	// Client is the MongoDB client.
-	Client *mongo.Client `json:"-" validate:"required"`
+	Client *mongo.Client `json:"-" validate:"required,structonly"`
 
 	// Config is the MongoDB configuration.
-	Config *Config `json:"-"`
+	// Skipped by the validator: it dives into untagged nested structs, and
+	// this config holds live client state that background goroutines write.
+	Config *Config `json:"-" validate:"-"`
 
 	// Database to connect to.
 	Database string `json:"database" validate:"required"`

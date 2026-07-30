@@ -65,7 +65,7 @@ type Postgres struct {
 	*storage.Storage
 
 	// Client is the postgres client.
-	Client *sqlx.DB `json:"-" validate:"required"`
+	Client *sqlx.DB `json:"-" validate:"required,structonly"`
 
 	// Config is the postgres configuration.
 	Config *Config `json:"-"`

@@ -61,10 +61,18 @@ type DynamoDB struct {
 	*storage.Storage
 
 	// Client is the DynamoDB client.
-	Client *dynamodb.DynamoDB `json:"-" validate:"required"`
+	//
+	// structonly: skips validating *into* the client's fields (only checks
+	// non-nilness) - same reasoning as Config below applies to any live SDK
+	// state reachable from it.
+	Client *dynamodb.DynamoDB `json:"-" validate:"required,structonly"`
 
 	// Config is the DynamoDB configuration.
-	Config Config `json:"-"`
+	//
+	// Skipped by the validator: it dives into untagged nested structs, and an
+	// aws.Config holds live SDK state (credentials guarded by a mutex, which
+	// background SDK goroutines write) that must not be read reflectively.
+	Config Config `json:"-" validate:"-"`
 
 	// Region is the AWS region.
 	Region string `json:"region" validate:"required"`

@@ -55,12 +55,12 @@ type (
 type SFTP struct {
 	*storage.Storage
 
-	Client *sftp.Client `json:"-" validate:"required"`
+	Client *sftp.Client `json:"-" validate:"required,structonly"`
 
 	// Conn is the underlying SSH transport carrying the SFTP subsystem.
 	// Client.Close only tears down the SFTP channel, so callers need this to
 	// release the TCP+SSH session — see Close.
-	Conn *ssh.Client `json:"-" validate:"required"`
+	Conn *ssh.Client `json:"-" validate:"required,structonly"`
 
 	// Target allows to set a static target. If it is empty, the target will be
 	// dynamic - the one set at the operation (count, create, delete, etc) time.
