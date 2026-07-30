@@ -968,6 +968,11 @@ func New(ctx context.Context, db string, cfg *Config) (*MongoDB, error) {
 
 	r := retrier.New(retrier.ExponentialBackoff(3, shared.TimeoutPing), nil)
 
+	// RunCtx returns the context's error when the deadline fires during a
+	// backoff sleep, which would drop the reason the attempts were failing.
+	// Keep the last one so the caller learns it was the ping that failed.
+	var lastErr error
+
 	if err := r.RunCtx(ctx, func(ctx context.Context) error {
 		if err := client.Ping(ctx, nil); err != nil {
 			cE := customerror.NewFailedToError(
@@ -978,11 +983,17 @@ func New(ctx context.Context, db string, cfg *Config) (*MongoDB, error) {
 
 			s.GetLogger().Errorln(cE)
 
+			lastErr = cE
+
 			return cE
 		}
 
 		return nil
 	}); err != nil {
+		if lastErr != nil && !errors.Is(err, lastErr) {
+			err = errors.Join(lastErr, err)
+		}
+
 		return nil, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterPingFailed())
 	}
 
