@@ -580,7 +580,7 @@ func TestFile_GetSetSingleton(t *testing.T) {
 	str := newTestStorage(t)
 
 	Set(nil)
-	assert.Panics(t, func() {
+	require.Panics(t, func() {
 		Get()
 	})
 
