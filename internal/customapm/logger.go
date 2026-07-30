@@ -23,7 +23,7 @@ type Logger struct {
 //////
 
 // Errorf implements required `Errorf` interface.
-func (l *Logger) Errorf(format string, args ...interface{}) {
+func (l *Logger) Errorf(format string, args ...any) {
 	l.s.PrintlnWithOptions(
 		level.Error,
 		fmt.Sprintf(format, args...),
@@ -32,7 +32,7 @@ func (l *Logger) Errorf(format string, args ...interface{}) {
 }
 
 // Debugf implements required  `Debugf` interface.
-func (l *Logger) Debugf(format string, args ...interface{}) {
+func (l *Logger) Debugf(format string, args ...any) {
 	l.s.PrintlnWithOptions(
 		level.Debug,
 		fmt.Sprintf(format, args...),

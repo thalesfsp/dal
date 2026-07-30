@@ -35,8 +35,12 @@ import (
 // Const, vars, and types.
 //////
 
-// Name of the storage.
-const Name = "mongodb"
+const (
+	// Name of the storage.
+	Name = "mongodb"
+
+	idField = "_id"
+)
 
 // Singleton.
 var (
@@ -156,7 +160,7 @@ func (m *MongoDB) Count(ctx context.Context, target string, prm *count.Count, op
 	filter := bson.D{}
 
 	if finalParam.Search != "" {
-		filterMap := map[string]interface{}{}
+		filterMap := map[string]any{}
 		if err := shared.Unmarshal([]byte(finalParam.Search), &filterMap); err != nil {
 			return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
 		}
@@ -318,7 +322,7 @@ func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Del
 		Client.
 		Database(o.Database).
 		Collection(trgt).
-		DeleteOne(ctx, bson.M{"_id": id}); err != nil {
+		DeleteOne(ctx, bson.M{idField: id}); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(
@@ -436,7 +440,7 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 		Client.
 		Database(o.Database).
 		Collection(trgt).
-		FindOne(ctx, bson.M{"_id": id}).
+		FindOne(ctx, bson.M{idField: id}).
 		Decode(&result); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return customapm.TraceError(
@@ -869,7 +873,7 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
 	}
 
-	updateFields := make(map[string]interface{})
+	updateFields := make(map[string]any)
 	if err := shared.Unmarshal(b, &updateFields); err != nil {
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
 	}
@@ -882,7 +886,7 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 		Client.
 		Database(o.Database).
 		Collection(trgt).
-		UpdateOne(ctx, bson.M{"_id": id}, update)
+		UpdateOne(ctx, bson.M{idField: id}, update)
 	if err != nil {
 		return customapm.TraceError(
 			ctx,

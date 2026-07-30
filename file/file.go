@@ -243,7 +243,7 @@ func (s *File) Delete(ctx context.Context, id, target string, prm *delete.Delete
 	// Delete a file in the dir. A missing file is treated as an idempotent,
 	// successful delete — but it must still run the post-hook, logging, and
 	// success metric below, so don't return early.
-	if err := os.Remove(trgt); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(trgt); err != nil && !errors.Is(err, os.ErrNotExist) { //nolint:gosec // The target is the caller-selected full path; this storage has no trusted root to traverse out of.
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(
@@ -351,7 +351,7 @@ func (s *File) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 		}
 	}
 
-	file, err := os.Open(trgt)
+	file, err := os.Open(trgt) //nolint:gosec // The target is the caller-selected full path; this storage has no trusted root to traverse out of.
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return customapm.TraceError(
@@ -595,18 +595,18 @@ func (s *File) Create(ctx context.Context, id, target string, v any, prm *create
 			dir := filepath.Dir(trgt)
 
 			// Check if the directory exists.
-			if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+			if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) { //nolint:gosec // dir is derived from the caller-selected full target path, not a path beneath a trusted root.
 				// Create the directory if it doesn't exist.
-				if err := os.MkdirAll(dir, 0o755); err != nil {
+				if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // dir is derived from the caller-selected full target path, not a path beneath a trusted root.
 					return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 				}
 			}
 
 			// Check if the file already exists.
-			if _, err := os.Stat(trgt); errors.Is(err, fs.ErrNotExist) {
+			if _, err := os.Stat(trgt); errors.Is(err, fs.ErrNotExist) { //nolint:gosec // The target is the caller-selected full path; this storage has no trusted root to traverse out of.
 				// Create the file if it doesn't exist, closing the handle so
 				// it doesn't leak.
-				f, err := os.Create(trgt)
+				f, err := os.Create(trgt) //nolint:gosec // The target is the caller-selected full path; this storage has no trusted root to traverse out of.
 				if err != nil {
 					return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 				}
@@ -628,7 +628,7 @@ func (s *File) Create(ctx context.Context, id, target string, v any, prm *create
 		}
 	}
 
-	file, err := os.Create(trgt)
+	file, err := os.Create(trgt) //nolint:gosec // The target is the caller-selected full path; this storage has no trusted root to traverse out of.
 	if err != nil {
 		return "", customapm.TraceError(
 			ctx,
@@ -752,7 +752,7 @@ func (s *File) Update(ctx context.Context, id, target string, v any, prm *update
 		}
 	}
 
-	file, err := os.Create(trgt)
+	file, err := os.Create(trgt) //nolint:gosec // The target is the caller-selected full path; this storage has no trusted root to traverse out of.
 	if err != nil {
 		return customapm.TraceError(
 			ctx,

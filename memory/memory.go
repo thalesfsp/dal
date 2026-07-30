@@ -60,7 +60,7 @@ type Memory struct {
 
 // keyMatches reports whether the stored key matches the glob pattern. Keys
 // that aren't strings never match. A malformed pattern returns an error.
-func keyMatches(pattern string, key interface{}) (bool, error) {
+func keyMatches(pattern string, key any) (bool, error) {
 	k, ok := key.(string)
 	if !ok {
 		return false, nil
@@ -142,7 +142,7 @@ func (s *Memory) Count(ctx context.Context, target string, prm *count.Count, opt
 
 	var matchErr error
 
-	s.client.Range(func(key, value interface{}) bool {
+	s.client.Range(func(key, value any) bool {
 		matched, err := keyMatches(pattern, key)
 		if err != nil {
 			matchErr = err
@@ -476,7 +476,7 @@ func (s *Memory) List(ctx context.Context, target string, v any, prm *list.List,
 		first    = true
 	)
 
-	s.client.Range(func(key, value interface{}) bool {
+	s.client.Range(func(key, value any) bool {
 		matched, err := keyMatches(pattern, key)
 		if err != nil {
 			matchErr = err

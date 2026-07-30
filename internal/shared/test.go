@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -177,11 +178,5 @@ func ErrorContains(err error, text ...string) bool {
 
 // IsEnvironment determines if the current environment is one of the provided.
 func IsEnvironment(environments ...string) bool {
-	for _, environment := range environments {
-		if os.Getenv("ENVIRONMENT") == environment {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(environments, os.Getenv("ENVIRONMENT"))
 }

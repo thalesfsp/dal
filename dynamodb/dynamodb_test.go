@@ -25,7 +25,7 @@ var listParam = &list.List{
 	Fields: []string{"id", "name", "version"},
 	Offset: 0,
 	Sort:   [][]string{{"id", customsort.Asc}},
-	Any:    map[string]interface{}{"version": shared.DocumentVersion},
+	Any:    map[string]any{"version": shared.DocumentVersion},
 }
 
 func TestNew(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -161,10 +162,19 @@ func TestFile_CreateIfNotExistDoesNotLeakFDs(t *testing.T) {
 	dir := t.TempDir()
 
 	countFDs := func() int {
-		entries, err := os.ReadDir("/proc/self/fd")
+		fdDir := "/proc/self/fd"
+		if runtime.GOOS == "darwin" {
+			fdDir = "/dev/fd"
+		}
+
+		dirHandle, err := os.Open(fdDir)
+		require.NoError(t, err)
+		defer dirHandle.Close()
+
+		names, err := dirHandle.Readdirnames(-1)
 		require.NoError(t, err)
 
-		return len(entries)
+		return len(names)
 	}
 
 	// Warm up any lazily-opened descriptors.

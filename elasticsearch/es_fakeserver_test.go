@@ -3,6 +3,7 @@ package elasticsearch
 import (
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -121,8 +122,11 @@ func (fs *fakeServer) CountPath(method, path string) int {
 // writeJSON writes status and body. Headers (including the product header)
 // must already be set by the caller before invoking this.
 func writeJSON(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = io.WriteString(w, body)
+	if err := json.NewEncoder(w).Encode(json.RawMessage(body)); err != nil {
+		return
+	}
 }
 
 // infoRoute answers `GET /` and `HEAD /` with a valid info payload, and
@@ -261,9 +265,7 @@ func (m *memStore) updateDoc(w http.ResponseWriter, index, id string, body []byt
 		return
 	}
 
-	for k, v := range wrapper.Doc {
-		existing[k] = v
-	}
+	maps.Copy(existing, wrapper.Doc)
 
 	m.docs[index][id] = existing
 

@@ -34,7 +34,7 @@ func TestSanitizePlaceholder(t *testing.T) {
 }
 
 func TestBuildFilterExpression_HappyPath(t *testing.T) {
-	expr, names, values, err := BuildFilterExpression(map[string]interface{}{
+	expr, names, values, err := BuildFilterExpression(map[string]any{
 		"name": "alpha",
 	})
 	require.NoError(t, err)
@@ -48,7 +48,7 @@ func TestBuildFilterExpression_HappyPath(t *testing.T) {
 // Attribute names DynamoDB placeholders can't carry directly (dashes, dots)
 // must still produce a valid expression (regression: ValidationException).
 func TestBuildFilterExpression_UnsafeAttributeNames(t *testing.T) {
-	expr, names, values, err := BuildFilterExpression(map[string]interface{}{
+	expr, names, values, err := BuildFilterExpression(map[string]any{
 		"created-at": "2020-01-01",
 	})
 	require.NoError(t, err)
@@ -73,7 +73,7 @@ func TestBuildFilterExpression_Empty(t *testing.T) {
 
 func TestBuildUpdateExpression_SkipsPrimaryKeyAndErrors(t *testing.T) {
 	// Happy path.
-	expr, names, values, err := BuildUpdateExpression(map[string]interface{}{
+	expr, names, values, err := BuildUpdateExpression(map[string]any{
 		"id":   "pk-value",
 		"name": "alpha",
 	}, "id")
@@ -85,14 +85,14 @@ func TestBuildUpdateExpression_SkipsPrimaryKeyAndErrors(t *testing.T) {
 	assert.Contains(t, values, ":name")
 
 	// Bad path: nothing to update.
-	expr, names, values, err = BuildUpdateExpression(map[string]interface{}{}, "id")
+	expr, names, values, err = BuildUpdateExpression(map[string]any{}, "id")
 	assert.Error(t, err)
 	assert.Nil(t, expr)
 	assert.Nil(t, names)
 	assert.Nil(t, values)
 
 	// Edge: only the primary key → error, not an empty SET.
-	expr, names, values, err = BuildUpdateExpression(map[string]interface{}{"id": "x"}, "id")
+	expr, names, values, err = BuildUpdateExpression(map[string]any{"id": "x"}, "id")
 	assert.Error(t, err)
 	assert.Nil(t, expr)
 	assert.Nil(t, names)

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"path"
 	"sort"
@@ -82,9 +83,7 @@ func (f *fakeRedis) seed(kv map[string]string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	for k, v := range kv {
-		f.data[k] = v
-	}
+	maps.Copy(f.data, kv)
 }
 
 func (f *fakeRedis) serve() {
@@ -236,9 +235,7 @@ func (f *fakeRedis) scan(w *bufio.Writer, args []string) {
 	}
 
 	end := cursor + pageSize
-	if end > len(keys) {
-		end = len(keys)
-	}
+	end = min(end, len(keys))
 
 	next := end
 	if next >= len(keys) {

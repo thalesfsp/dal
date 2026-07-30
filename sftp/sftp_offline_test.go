@@ -87,11 +87,7 @@ func startTestSSHServer(t *testing.T, rejectSubsystem bool) string {
 
 	srv := &testSSHServer{ln: ln, rejectSubsystem: rejectSubsystem}
 
-	srv.wg.Add(1)
-
-	go func() {
-		defer srv.wg.Done()
-
+	srv.wg.Go(func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -102,15 +98,11 @@ func startTestSSHServer(t *testing.T, rejectSubsystem bool) string {
 			srv.conns = append(srv.conns, conn)
 			srv.mu.Unlock()
 
-			srv.wg.Add(1)
-
-			go func() {
-				defer srv.wg.Done()
-
+			srv.wg.Go(func() {
 				srv.handleConn(conn, cfg)
-			}()
+			})
 		}
-	}()
+	})
 
 	t.Cleanup(func() {
 		_ = ln.Close()

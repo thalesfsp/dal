@@ -2,6 +2,7 @@ package elasticsearch
 
 import (
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/elastic/go-elasticsearch/v8/esapi"
@@ -74,13 +75,7 @@ func buildReasonChain(top ResponseErrorFromESReason) string {
 // containsString returns true if needle is already in haystack. Linear scan
 // is fine — the chain is bounded by maxCausedByDepth and rootCause[0].
 func containsString(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(haystack, needle)
 }
 
 // Check if there was an response error.

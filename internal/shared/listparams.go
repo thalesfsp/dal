@@ -86,7 +86,9 @@ func compareValues(a, b any) int {
 			return 0
 		}
 	case string:
-		return strings.Compare(av, b.(string))
+		bv, _ := b.(string)
+
+		return strings.Compare(av, bv)
 	default:
 		// nil == nil, and objects/arrays are treated as equal.
 		return 0
