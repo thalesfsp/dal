@@ -740,7 +740,7 @@ func (m *MySQL) Create(ctx context.Context, id, target string, v any, prm *creat
 
 	if o.PostHookFunc != nil {
 		if err := o.PostHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
-			return "", err
+			return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
 		}
 	}
 
