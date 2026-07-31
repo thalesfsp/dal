@@ -360,11 +360,19 @@ func (r *Redis) Retrieve(ctx context.Context, id, target string, v any, prm *ret
 			r.GetCounterRetrievedFailed())
 	}
 
-	if objStr != "" {
-		b := []byte(objStr)
-		if err := shared.Unmarshal(b, v); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterRetrievedFailed())
-		}
+	// Only a zero-byte value means there is no payload to decode. Nonempty JSON
+	// values such as {}, [], "", and null are legitimate and must be decoded.
+	if len(objStr) == 0 {
+		return customapm.TraceError(
+			ctx,
+			customerror.NewHTTPError(http.StatusNotFound),
+			r.GetLogger(),
+			r.GetCounterRetrievedFailed(),
+		)
+	}
+
+	if err := shared.Unmarshal([]byte(objStr), v); err != nil {
+		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterRetrievedFailed())
 	}
 
 	if o.PostHookFunc != nil {

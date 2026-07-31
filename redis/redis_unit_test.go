@@ -2,14 +2,17 @@ package redis
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v3/internal/shared"
 	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
@@ -149,26 +152,70 @@ func TestRedisOffline_EmptyID(t *testing.T) {
 	assert.Error(t, str.Delete(ctx, "", "", nil))
 }
 
-// Retrieve edge cases: missing key (404), empty payload (skips unmarshal) and
-// a corrupt payload (unmarshal error).
+// Retrieve distinguishes missing/empty values from valid empty documents and
+// malformed JSON.
 func TestRedisOffline_RetrieveEdgeCases(t *testing.T) {
 	ctx := t.Context()
 
 	f, str := newOfflineStorage(t)
 
 	f.seed(map[string]string{
-		"empty-doc": "",
-		"bad-doc":   "{not-json",
+		"empty-payload":  "",
+		"empty-document": `{}`,
+		"bad-document":   `{not-json`,
 	})
 
-	var got shared.TestDataS
+	var missingDestination shared.TestDataS
 
-	assert.Error(t, str.Retrieve(ctx, shared.DocumentIDInvalid, "", &got, nil), "missing key must fail")
+	missingErr := str.Retrieve(ctx, shared.DocumentIDInvalid, "", &missingDestination, nil)
+	require.Error(t, missingErr, "missing key must fail")
+	assert.True(t, customerror.IsHTTPStatus(missingErr, http.StatusNotFound))
 
-	require.NoError(t, str.Retrieve(ctx, "empty-doc", "", &got, nil), "empty payload must not fail")
-	assert.Empty(t, got.Name)
+	var missingCustomErr *customerror.CustomError
+	require.ErrorAs(t, missingErr, &missingCustomErr)
+	assert.Equal(t, http.StatusNotFound, missingCustomErr.StatusCode)
 
-	assert.Error(t, str.Retrieve(ctx, "bad-doc", "", &got, nil), "corrupt payload must fail")
+	var emptyDestination shared.TestDataS
+
+	emptyErr := str.Retrieve(ctx, "empty-payload", "", &emptyDestination, nil)
+	require.Error(t, emptyErr, "empty payload must return NotFound")
+	assert.True(t, customerror.IsHTTPStatus(emptyErr, http.StatusNotFound))
+
+	var emptyCustomErr *customerror.CustomError
+	require.ErrorAs(t, emptyErr, &emptyCustomErr)
+	assert.Equal(t, http.StatusNotFound, emptyCustomErr.StatusCode)
+
+	var emptyDocument *shared.TestDataS
+
+	require.NoError(t, str.Retrieve(ctx, "empty-document", "", &emptyDocument, nil))
+	require.NotNil(t, emptyDocument, "decoding {} must populate the destination")
+	assert.Equal(t, shared.TestDataS{}, *emptyDocument)
+
+	var malformedDestination shared.TestDataS
+
+	malformedErr := str.Retrieve(ctx, "bad-document", "", &malformedDestination, nil)
+	require.Error(t, malformedErr, "malformed JSON must fail")
+	assert.False(t, customerror.IsHTTPStatus(malformedErr, http.StatusNotFound))
+
+	var malformedCustomErr *customerror.CustomError
+	require.ErrorAs(t, malformedErr, &malformedCustomErr)
+	assert.NotEqual(t, missingCustomErr.StatusCode, malformedCustomErr.StatusCode,
+		"decode errors and NotFound errors must have different error classifications")
+
+	var malformedSyntaxErr *json.SyntaxError
+	require.ErrorAs(t, malformedErr, &malformedSyntaxErr)
+
+	var missingSyntaxErr *json.SyntaxError
+	assert.False(t, errors.As(missingErr, &missingSyntaxErr),
+		"NotFound and malformed JSON must wrap different error types")
+
+	id, err := str.Create(ctx, "populated-document", "", shared.TestData, nil)
+	require.NoError(t, err)
+
+	var populatedDestination shared.TestDataS
+
+	require.NoError(t, str.Retrieve(ctx, id, "", &populatedDestination, nil))
+	assert.Equal(t, *shared.TestData, populatedDestination)
 }
 
 // Unmarshalable documents make Create and Update fail before hitting Redis.
