@@ -170,6 +170,47 @@ func TestNewOffline(t *testing.T) {
 	})
 }
 
+func TestMongoDBOffline_Close(t *testing.T) {
+	t.Run("disconnects client and is idempotent", func(t *testing.T) {
+		st, dep := newMockedStorage(t)
+
+		require.NoError(t, st.Close())
+		require.NoError(t, st.Close())
+		assert.True(t, dep.Disconnected(), "Close must disconnect the MongoDB deployment")
+
+		err := st.Client.Ping(t.Context(), nil)
+		require.Error(t, err, "operation after Close must fail because client is disconnected")
+	})
+
+	t.Run("concurrent calls", func(t *testing.T) {
+		st, dep := newMockedStorage(t)
+
+		const callers = 8
+
+		errs := make(chan error, callers)
+		for range callers {
+			go func() {
+				errs <- st.Close()
+			}()
+		}
+
+		for range callers {
+			require.NoError(t, <-errs)
+		}
+
+		assert.True(t, dep.Disconnected(), "Close must disconnect the MongoDB deployment")
+	})
+
+	t.Run("propagates disconnect error once", func(t *testing.T) {
+		st, dep := newMockedStorage(t)
+		disconnectErr := errors.New("mongodb disconnect failed")
+		dep.disconnectErr = disconnectErr
+
+		require.ErrorIs(t, st.Close(), disconnectErr)
+		require.NoError(t, st.Close())
+	})
+}
+
 //////
 // Singleton accessors.
 //////

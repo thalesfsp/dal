@@ -41,8 +41,72 @@ func newOfflineStorage(t *testing.T) (*fakeRedis, *Redis) {
 	return f, str
 }
 
+type closeErrorConn struct {
+	net.Conn
+
+	err error
+}
+
+func (c *closeErrorConn) Close() error {
+	_ = c.Conn.Close()
+
+	return c.err
+}
+
 // errHookBoom is returned by failing test hooks.
 var errHookBoom = errors.New("hook boom")
+
+func TestRedisOffline_Close(t *testing.T) {
+	t.Run("closes client and is idempotent", func(t *testing.T) {
+		_, str := newOfflineStorage(t)
+
+		require.NoError(t, str.Close())
+		require.NoError(t, str.Close())
+
+		_, err := str.Client.Ping(t.Context()).Result()
+		require.Error(t, err, "operation after Close must fail because client is closed")
+	})
+
+	t.Run("concurrent calls", func(t *testing.T) {
+		_, str := newOfflineStorage(t)
+
+		const callers = 8
+
+		errs := make(chan error, callers)
+		for range callers {
+			go func() {
+				errs <- str.Close()
+			}()
+		}
+
+		for range callers {
+			require.NoError(t, <-errs)
+		}
+	})
+
+	t.Run("propagates client close error once", func(t *testing.T) {
+		f := startFakeRedis(t)
+		closeErr := errors.New("redis connection close failed")
+		dialer := &net.Dialer{}
+		cfg := &Config{
+			Addr: f.Addr(),
+			Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				conn, err := dialer.DialContext(ctx, network, addr)
+				if err != nil {
+					return nil, err
+				}
+
+				return &closeErrorConn{Conn: conn, err: closeErr}, nil
+			},
+		}
+
+		str, err := New(t.Context(), cfg)
+		require.NoError(t, err)
+
+		require.ErrorIs(t, str.Close(), closeErr)
+		require.NoError(t, str.Close())
+	})
+}
 
 // Happy path: full CRUD round-trip, plus Count/List with glob patterns.
 func TestRedisOffline_CRUDRoundTrip(t *testing.T) {

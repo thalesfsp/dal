@@ -37,6 +37,10 @@ type mockDeployment struct {
 
 	mu           sync.Mutex
 	disconnected bool
+
+	// disconnectErr, when set, is returned instead of delegating to the driver
+	// mock — so a test can exercise Close's error path without a real failure.
+	disconnectErr error
 }
 
 // Disconnect records the call and delegates to the driver mock exactly once.
@@ -49,6 +53,12 @@ func (md *mockDeployment) Disconnect(ctx context.Context) error {
 	}
 
 	md.disconnected = true
+
+	// The call is recorded either way, so Disconnected() stays truthful even on
+	// the injected-failure path.
+	if md.disconnectErr != nil {
+		return md.disconnectErr
+	}
 
 	return md.MockDeployment.Disconnect(ctx)
 }

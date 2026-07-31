@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/thalesfsp/customerror"
@@ -41,6 +42,11 @@ const (
 	Name = "mongodb"
 
 	idField = "_id"
+
+	// Ten seconds matches the adapter's ping bound: it gives the driver ample
+	// time to drain its pool while preventing a stuck topology shutdown from
+	// blocking Close forever.
+	mongoDisconnectTimeout = 10 * time.Second
 )
 
 // Singleton.
@@ -58,6 +64,8 @@ type MongoDB struct {
 
 	// Client is the MongoDB client.
 	Client *mongo.Client `json:"-" validate:"required,structonly"`
+
+	closeOnce sync.Once
 
 	// Config is the MongoDB configuration.
 	// Skipped by the validator: it dives into untagged nested structs, and
@@ -964,8 +972,16 @@ func (m *MongoDB) GetClient() any {
 
 // Close releases the resources held by the storage.
 func (m *MongoDB) Close() error {
-	// TODO(v3): real implementation lands in C1b/C1c.
-	return nil
+	var closeErr error
+
+	m.closeOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), mongoDisconnectTimeout)
+		defer cancel()
+
+		closeErr = m.Client.Disconnect(ctx)
+	})
+
+	return closeErr
 }
 
 //////

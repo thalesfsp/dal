@@ -48,6 +48,31 @@ type sampleDoc struct {
 // errHook is returned by the failing branch of hookRecorder.
 var errHook = errors.New("hook failure")
 
+type closeTrackingTransport struct {
+	next http.RoundTripper
+
+	mu         sync.Mutex
+	closeCalls int
+}
+
+func (t *closeTrackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.next.RoundTrip(req)
+}
+
+func (t *closeTrackingTransport) CloseIdleConnections() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.closeCalls++
+}
+
+func (t *closeTrackingTransport) CloseCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.closeCalls
+}
+
 // hookRecorder returns a storage.HookFunc that records it was called (via
 // *called) and returns err. Parameterizing err (rather than hardcoding nil or
 // a fixed error in each call site's closure) keeps every generated closure's
@@ -78,6 +103,48 @@ func newTestS3(t *testing.T, fake *s3Fake) *S3 {
 	require.NotNil(t, str.Client)
 
 	return str
+}
+
+func TestS3Offline_Close(t *testing.T) {
+	newStorage := func(t *testing.T) (*S3, *closeTrackingTransport) {
+		t.Helper()
+
+		fake := newS3Fake("close-bucket")
+		transport := &closeTrackingTransport{next: fake.client().Transport}
+		client := &http.Client{Transport: transport}
+
+		str, err := New(t.Context(), fake.bucket, s3TestConfig(s3PlaceholderEndpoint, client))
+		require.NoError(t, err)
+
+		return str, transport
+	}
+
+	t.Run("closes idle connections and is idempotent", func(t *testing.T) {
+		str, transport := newStorage(t)
+
+		require.NoError(t, str.Close())
+		require.NoError(t, str.Close())
+		assert.Equal(t, 1, transport.CloseCalls(), "Close must release the AWS HTTP client's idle connections")
+	})
+
+	t.Run("concurrent calls", func(t *testing.T) {
+		str, transport := newStorage(t)
+
+		const callers = 8
+
+		errs := make(chan error, callers)
+		for range callers {
+			go func() {
+				errs <- str.Close()
+			}()
+		}
+
+		for range callers {
+			require.NoError(t, <-errs)
+		}
+
+		assert.Equal(t, 1, transport.CloseCalls(), "idle connections must be closed exactly once")
+	})
 }
 
 // sharedS3, sharedFake back sharedTestS3: most tests below only care that

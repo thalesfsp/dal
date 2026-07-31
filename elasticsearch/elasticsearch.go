@@ -61,6 +61,8 @@ type ElasticSearch struct {
 	// Client is the ElasticSearch client.
 	Client *elasticsearch.Client `json:"-" validate:"required,structonly"`
 
+	closeOnce sync.Once
+
 	// Config is the ElasticSearch configuration.
 	Config Config `json:"-"`
 
@@ -1086,8 +1088,21 @@ func (es *ElasticSearch) GetClient() any {
 
 // Close releases the resources held by the storage.
 func (es *ElasticSearch) Close() error {
-	// TODO(v3): real implementation lands in C1b/C1c.
-	return nil
+	var closeErr error
+
+	es.closeOnce.Do(func() {
+		// The client has no socket handle of its own. Close marks its HTTP
+		// transport closed, stops discovery, and drains its connection pool.
+		closeErr = es.Client.Close(context.Background())
+
+		// A caller-supplied HTTP transport remains owned by the adapter and may
+		// retain keep-alive connections after the ES transport shuts down.
+		if closer, ok := es.Config.Transport.(interface{ CloseIdleConnections() }); ok {
+			closer.CloseIdleConnections()
+		}
+	})
+
+	return closeErr
 }
 
 //////

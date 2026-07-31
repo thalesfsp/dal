@@ -50,6 +50,8 @@ type Redis struct {
 	// Client is the Redis client.
 	Client *redis.Client `json:"-" validate:"required,structonly"`
 
+	closeOnce sync.Once
+
 	// Config is the Redis configuration.
 	// Skipped by the validator: it dives into untagged nested structs, and
 	// this config holds live client state that background goroutines write.
@@ -725,8 +727,13 @@ func (r *Redis) GetClient() any {
 
 // Close releases the resources held by the storage.
 func (r *Redis) Close() error {
-	// TODO(v3): real implementation lands in C1b/C1c.
-	return nil
+	var closeErr error
+
+	r.closeOnce.Do(func() {
+		closeErr = r.Client.Close()
+	})
+
+	return closeErr
 }
 
 //////
