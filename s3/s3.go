@@ -59,6 +59,8 @@ type S3 struct {
 	// Client is the S3 client.
 	Client *s3.S3 `json:"-" validate:"required,structonly"`
 
+	closeOnce sync.Once
+
 	// Config is the S3 configuration.
 	//
 	// Skipped by the validator: it dives into untagged nested structs, and an
@@ -868,7 +870,14 @@ func (s *S3) GetClient() any {
 
 // Close releases the resources held by the storage.
 func (s *S3) Close() error {
-	// TODO(v3): real implementation lands in C1b/C1c.
+	s.closeOnce.Do(func() {
+		// aws-sdk-go v1 sessions have no Close method. Their only retained
+		// network resource is the HTTP client's idle keep-alive pool.
+		if s.Client.Config.HTTPClient != nil {
+			s.Client.Config.HTTPClient.CloseIdleConnections()
+		}
+	})
+
 	return nil
 }
 

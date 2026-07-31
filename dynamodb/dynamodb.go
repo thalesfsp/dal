@@ -67,6 +67,8 @@ type DynamoDB struct {
 	// state reachable from it.
 	Client *dynamodb.DynamoDB `json:"-" validate:"required,structonly"`
 
+	closeOnce sync.Once
+
 	// Config is the DynamoDB configuration.
 	//
 	// Skipped by the validator: it dives into untagged nested structs, and an
@@ -1100,7 +1102,14 @@ func (d *DynamoDB) GetClient() any {
 
 // Close releases the resources held by the storage.
 func (d *DynamoDB) Close() error {
-	// TODO(v3): real implementation lands in C1b/C1c.
+	d.closeOnce.Do(func() {
+		// aws-sdk-go v1 sessions have no Close method. Their only retained
+		// network resource is the HTTP client's idle keep-alive pool.
+		if d.Client.Config.HTTPClient != nil {
+			d.Client.Config.HTTPClient.CloseIdleConnections()
+		}
+	})
+
 	return nil
 }
 

@@ -177,9 +177,10 @@ func (*zeroRTTMonitor) Stats() string { return "" }
 type mockDeployment struct {
 	conn *mockConnection
 
-	mu           sync.Mutex
-	updates      chan description.Topology
-	disconnected bool
+	mu            sync.Mutex
+	updates       chan description.Topology
+	disconnected  bool
+	disconnectErr error
 }
 
 var (
@@ -223,7 +224,7 @@ func (md *mockDeployment) Disconnect(context.Context) error {
 		}
 	}
 
-	return nil
+	return md.disconnectErr
 }
 
 // Disconnected reports whether Disconnect was called - used by tests to assert

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,6 +37,48 @@ var (
 	errBranchPost = errors.New("post-hook boom")
 )
 
+type closeTrackingRoundTripper struct {
+	next http.RoundTripper
+
+	mu         sync.Mutex
+	closeCalls int
+}
+
+func (t *closeTrackingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.next.RoundTrip(req)
+}
+
+func (t *closeTrackingRoundTripper) CloseIdleConnections() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.closeCalls++
+
+	if closer, ok := t.next.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
+func (t *closeTrackingRoundTripper) CloseCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.closeCalls
+}
+
+type failingCloseESTransport struct {
+	perform  func(*http.Request) (*http.Response, error)
+	closeErr error
+}
+
+func (t *failingCloseESTransport) Perform(req *http.Request) (*http.Response, error) {
+	return t.perform(req)
+}
+
+func (t *failingCloseESTransport) Close(context.Context) error {
+	return t.closeErr
+}
+
 // newTestES starts a memStore-backed fake server and returns a connected
 // ElasticSearch storage pointed at it, along with the store so tests can
 // seed documents directly.
@@ -51,6 +94,71 @@ func newTestES(t *testing.T, index string) (*ElasticSearch, *memStore, *fakeServ
 	require.NotNil(t, es.Client)
 
 	return es, store, srv
+}
+
+func TestElasticSearchOffline_Close(t *testing.T) {
+	newStorage := func(t *testing.T) (*ElasticSearch, *closeTrackingRoundTripper) {
+		t.Helper()
+
+		srv := newFakeServer(t, infoRoute(nil))
+		baseTransport, ok := http.DefaultTransport.(*http.Transport)
+		require.True(t, ok)
+
+		transport := &closeTrackingRoundTripper{
+			next: baseTransport.Clone(),
+		}
+
+		es, err := New(t.Context(), Config{
+			Addresses: []string{srv.URL},
+			Transport: transport,
+		})
+		require.NoError(t, err)
+
+		return es, transport
+	}
+
+	t.Run("closes client and idle connections and is idempotent", func(t *testing.T) {
+		es, transport := newStorage(t)
+
+		require.NoError(t, es.Close())
+		require.NoError(t, es.Close())
+		assert.Equal(t, 1, transport.CloseCalls(), "Close must release the HTTP transport's idle connections")
+
+		_, err := es.Client.Info()
+		require.Error(t, err, "operation after Close must fail because client is closed")
+	})
+
+	t.Run("concurrent calls", func(t *testing.T) {
+		es, transport := newStorage(t)
+
+		const callers = 8
+
+		errs := make(chan error, callers)
+		for range callers {
+			go func() {
+				errs <- es.Close()
+			}()
+		}
+
+		for range callers {
+			require.NoError(t, <-errs)
+		}
+
+		assert.Equal(t, 1, transport.CloseCalls(), "idle connections must be closed exactly once")
+	})
+
+	t.Run("propagates client close error once", func(t *testing.T) {
+		es, _ := newStorage(t)
+		closeErr := errors.New("elasticsearch transport close failed")
+		transport := es.Client.Transport
+		es.Client.Transport = &failingCloseESTransport{
+			perform:  transport.Perform,
+			closeErr: closeErr,
+		}
+
+		require.ErrorIs(t, es.Close(), closeErr)
+		require.NoError(t, es.Close())
+	})
 }
 
 //////
