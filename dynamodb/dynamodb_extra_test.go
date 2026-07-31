@@ -122,6 +122,65 @@ func TestNew_HappyPath(t *testing.T) {
 	assert.Equal(t, "", str.Target())
 }
 
+func TestNew_FunctionalOptions(t *testing.T) {
+	t.Run("option satisfies required field", func(t *testing.T) {
+		fake := newDynamoFake()
+
+		str, err := New(
+			t.Context(),
+			"",
+			dynamoTestConfig(fake.client()),
+			func(d *DynamoDB) { d.Region = "us-west-2" },
+		)
+
+		require.NoError(t, err)
+		require.NotNil(t, str)
+		assert.Equal(t, "us-west-2", str.Region)
+	})
+
+	t.Run("invalid option is rejected by validation", func(t *testing.T) {
+		fake := newDynamoFake()
+
+		str, err := New(
+			t.Context(),
+			"us-east-1",
+			dynamoTestConfig(fake.client()),
+			func(d *DynamoDB) { d.PrimaryKey = "" },
+		)
+
+		require.Error(t, err)
+		assert.Nil(t, str)
+		assert.ErrorContains(t, err, "PrimaryKey")
+	})
+
+	t.Run("zero options preserves defaults", func(t *testing.T) {
+		fake := newDynamoFake()
+
+		str, err := New(t.Context(), "us-east-1", dynamoTestConfig(fake.client()))
+
+		require.NoError(t, err)
+		require.NotNil(t, str)
+		assert.Equal(t, "us-east-1", str.Region)
+		assert.Equal(t, "id", str.PrimaryKey)
+	})
+
+	t.Run("multiple options apply in order", func(t *testing.T) {
+		fake := newDynamoFake()
+
+		str, err := New(
+			t.Context(),
+			"us-east-1",
+			dynamoTestConfig(fake.client()),
+			func(d *DynamoDB) { d.PrimaryKey = "first" },
+			func(d *DynamoDB) { d.PrimaryKey = "last" },
+		)
+
+		require.NoError(t, err)
+		require.NotNil(t, str)
+		assert.Equal(t, "last", str.PrimaryKey)
+	})
+}
+
 func TestNew_PingFailure(t *testing.T) {
 	fake := newDynamoFake()
 	fake.setOverride("ListTables", http.StatusInternalServerError, "InternalServerError")

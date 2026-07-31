@@ -1109,18 +1109,29 @@ func (d *DynamoDB) Close() error {
 //////
 
 // New creates a new DynamoDB storage.
-func New(ctx context.Context, region string, cfg *Config) (*DynamoDB, error) {
-	return NewWithTable(ctx, region, "", cfg)
+func New(ctx context.Context, region string, cfg *Config, options ...func(*DynamoDB)) (*DynamoDB, error) {
+	return NewWithTable(ctx, region, "", cfg, options...)
 }
 
 // NewWithTable creates a new DynamoDB storage with a static table name.
-func NewWithTable(ctx context.Context, region, tableName string, cfg *Config) (*DynamoDB, error) {
-	return NewWithDynamicTable(ctx, region, func() string { return tableName }, cfg)
+func NewWithTable(
+	ctx context.Context,
+	region, tableName string,
+	cfg *Config,
+	options ...func(*DynamoDB),
+) (*DynamoDB, error) {
+	return NewWithDynamicTable(ctx, region, func() string { return tableName }, cfg, options...)
 }
 
 // NewWithDynamicTable creates a new DynamoDB storage with a dynamic table function.
 // This allows for table names to be computed at runtime, useful for time-based partitioning.
-func NewWithDynamicTable(ctx context.Context, region string, dynamicTableFunc DynamicTableFunc, cfg *Config) (*DynamoDB, error) {
+func NewWithDynamicTable(
+	ctx context.Context,
+	region string,
+	dynamicTableFunc DynamicTableFunc,
+	cfg *Config,
+	options ...func(*DynamoDB),
+) (*DynamoDB, error) {
 	// Enforces IStorage interface implementation.
 	var _ storage.IStorage = (*DynamoDB)(nil)
 
@@ -1207,6 +1218,10 @@ func NewWithDynamicTable(ctx context.Context, region string, dynamicTableFunc Dy
 		Region:     region,
 		PrimaryKey: "id", // Default primary key
 		Target:     dynamicTableFunc,
+	}
+
+	for _, option := range options {
+		option(storage)
 	}
 
 	if err := validation.Validate(storage); err != nil {
