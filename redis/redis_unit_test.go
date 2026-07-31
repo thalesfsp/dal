@@ -14,6 +14,7 @@ import (
 	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
+	"github.com/thalesfsp/params/v2/customsort"
 	"github.com/thalesfsp/params/v2/delete"
 	"github.com/thalesfsp/params/v2/list"
 	"github.com/thalesfsp/params/v2/retrieve"
@@ -80,15 +81,15 @@ func TestRedisOffline_CRUDRoundTrip(t *testing.T) {
 	assert.EqualValues(t, 0, c)
 
 	// List: glob match, and no match.
-	var keys ResponseListKeys
+	var docs ResponseList[shared.TestDataWithIDS]
 
-	require.NoError(t, str.List(ctx, "", &keys, &list.List{Search: "VF*"}))
-	assert.Equal(t, []string{shared.DocumentID}, keys.Keys)
+	require.NoError(t, str.List(ctx, "", &docs, &list.List{Search: "VF*"}))
+	assert.Equal(t, []shared.TestDataWithIDS{*shared.UpdatedTestDataID}, docs.Items)
 
-	var none ResponseListKeys
+	var none ResponseList[shared.TestDataWithIDS]
 
 	require.NoError(t, str.List(ctx, "", &none, &list.List{Search: "zzz*"}))
-	assert.Empty(t, none.Keys)
+	assert.Empty(t, none.Items)
 
 	// Delete, then the document must be gone.
 	require.NoError(t, str.Delete(ctx, id, "", &delete.Delete{}))
@@ -120,10 +121,10 @@ func TestRedisOffline_NilParams(t *testing.T) {
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, c)
 
-	var keys ResponseListKeys
+	var docs ResponseList[shared.TestDataS]
 
-	require.NoError(t, str.List(ctx, "", &keys, nil))
-	assert.Equal(t, []string{"nil-prm"}, keys.Keys)
+	require.NoError(t, str.List(ctx, "", &docs, nil))
+	assert.Equal(t, []shared.TestDataS{*shared.TestData}, docs.Items)
 
 	require.NoError(t, str.Update(ctx, "nil-prm", "", shared.UpdatedTestData, nil))
 	require.NoError(t, str.Delete(ctx, "nil-prm", "", nil))
@@ -217,10 +218,146 @@ func TestRedisOffline_ScanPagination(t *testing.T) {
 	require.NoError(t, err)
 	assert.EqualValues(t, total, c)
 
-	var keys ResponseListKeys
+	var docs ResponseList[shared.TestDataS]
 
-	require.NoError(t, str.List(ctx, "", &keys, &list.List{Search: "bulk:*"}))
-	assert.Len(t, keys.Keys, total)
+	require.NoError(t, str.List(ctx, "", &docs, &list.List{Search: "bulk:*"}))
+	assert.Len(t, docs.Items, total)
+}
+
+type redisListParamsDoc struct {
+	ID    string `json:"id"`
+	Group string `json:"group"`
+	Rank  int    `json:"rank"`
+	Drop  string `json:"drop"`
+}
+
+func TestRedisOffline_ListParams(t *testing.T) {
+	ctx := t.Context()
+	f, str := newOfflineStorage(t)
+
+	seed := make(map[string]string, 13)
+	for i := range 13 {
+		seed[fmt.Sprintf("params-%02d", i)] = fmt.Sprintf(
+			`{"id":"doc-%02d","group":"%s","rank":%d,"drop":"drop"}`,
+			i,
+			[]string{"b", "a"}[i%2],
+			i,
+		)
+	}
+	f.seed(seed)
+
+	listDocs := func(t *testing.T, prm *list.List) []redisListParamsDoc {
+		t.Helper()
+
+		var got ResponseList[redisListParamsDoc]
+		require.NoError(t, str.List(ctx, "", &got, prm))
+
+		return got.Items
+	}
+
+	t.Run("sort ascending and descending", func(t *testing.T) {
+		asc := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+		})
+		require.Len(t, asc, 13)
+		assert.Equal(t, 0, asc[0].Rank)
+		assert.Equal(t, 12, asc[12].Rank)
+
+		desc := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Desc}},
+		})
+		require.Len(t, desc, 13)
+		assert.Equal(t, 12, desc[0].Rank)
+		assert.Equal(t, 0, desc[12].Rank)
+	})
+
+	t.Run("multi-key sort breaks ties with second key", func(t *testing.T) {
+		got := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort: customsort.SortSlice{
+				{"group", customsort.Asc},
+				{"rank", customsort.Desc},
+			},
+		})
+		require.Len(t, got, 13)
+		assert.Equal(t, "a", got[0].Group)
+		assert.Equal(t, 11, got[0].Rank)
+		assert.Equal(t, 9, got[1].Rank)
+		assert.Equal(t, "b", got[6].Group)
+		assert.Equal(t, 12, got[6].Rank)
+	})
+
+	t.Run("offset alone", func(t *testing.T) {
+		assert.Len(t, listDocs(t, &list.List{Search: "params-*", Offset: 3}), 10)
+	})
+
+	t.Run("limit alone", func(t *testing.T) {
+		assert.Len(t, listDocs(t, &list.List{Search: "params-*", Limit: 4}), 4)
+	})
+
+	t.Run("offset and limit", func(t *testing.T) {
+		got := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+			Offset: 3,
+			Limit:  4,
+		})
+		require.Len(t, got, 4)
+		assert.Equal(t, []int{3, 4, 5, 6}, []int{got[0].Rank, got[1].Rank, got[2].Rank, got[3].Rank})
+	})
+
+	t.Run("fields projection", func(t *testing.T) {
+		var got ResponseList[map[string]any]
+		require.NoError(t, str.List(ctx, "", &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+			Fields: []string{"id"},
+		}))
+		require.Len(t, got.Items, 13)
+		assert.Equal(t, map[string]any{"id": "doc-00"}, got.Items[0])
+	})
+
+	t.Run("combined", func(t *testing.T) {
+		var got ResponseList[map[string]any]
+		require.NoError(t, str.List(ctx, "", &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Desc}},
+			Offset: 2,
+			Limit:  3,
+			Fields: []string{"id"},
+		}))
+		assert.Equal(t, []map[string]any{
+			{"id": "doc-10"},
+			{"id": "doc-09"},
+			{"id": "doc-08"},
+		}, got.Items)
+	})
+
+	t.Run("list.New default limits to ten", func(t *testing.T) {
+		prm, err := list.New()
+		require.NoError(t, err)
+		prm.Search = "params-*"
+
+		assert.Len(t, listDocs(t, prm), 10)
+	})
+
+	t.Run("nil params leave behavior unchanged", func(t *testing.T) {
+		assert.Len(t, listDocs(t, nil), 13)
+	})
+
+	t.Run("invalid sort order uses normal error path", func(t *testing.T) {
+		failedBefore := str.GetCounterListedFailed().Value()
+
+		var got ResponseList[redisListParamsDoc]
+		err := str.List(ctx, "", &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", "sideways"}},
+		})
+		require.Error(t, err)
+		assert.Equal(t, failedBefore+1, str.GetCounterListedFailed().Value())
+	})
 }
 
 // Options and hooks: invalid option, failing pre-hook, failing post-hook and
@@ -372,7 +509,7 @@ func TestRedisOffline_Hooks(t *testing.T) {
 	})
 
 	t.Run("list", func(t *testing.T) {
-		var keys ResponseListKeys
+		var keys ResponseList[shared.TestDataS]
 
 		err := str.List(ctx, "", &keys, nil, storage.WithPreHook[*list.List](nil))
 		assert.Error(t, err, "nil pre-hook option must fail")
@@ -457,7 +594,7 @@ func TestRedisOffline_ServerDown(t *testing.T) {
 	_, err = str.Count(ctx, "", nil)
 	assert.Error(t, err)
 
-	var keys ResponseListKeys
+	var keys ResponseList[shared.TestDataS]
 
 	assert.Error(t, str.List(ctx, "", &keys, nil))
 

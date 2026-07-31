@@ -11,6 +11,7 @@ import (
 	"github.com/thalesfsp/dal/v3/internal/shared"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
+	"github.com/thalesfsp/params/v2/customsort"
 	"github.com/thalesfsp/params/v2/delete"
 	"github.com/thalesfsp/params/v2/list"
 	"github.com/thalesfsp/params/v2/retrieve"
@@ -141,6 +142,142 @@ func TestMemory_SearchGlobFiltering(t *testing.T) {
 
 	err = str.List(ctx, "", &empty, &list.List{Search: "["})
 	assert.Error(t, err)
+}
+
+type memoryListParamsDoc struct {
+	ID    string `json:"id"`
+	Group string `json:"group"`
+	Rank  int    `json:"rank"`
+	Drop  string `json:"drop"`
+}
+
+func TestMemory_ListParams(t *testing.T) {
+	ctx := t.Context()
+	str := newTestStorage(t)
+
+	for i := range 13 {
+		doc := &memoryListParamsDoc{
+			ID:    fmt.Sprintf("doc-%02d", i),
+			Group: []string{"b", "a"}[i%2],
+			Rank:  i,
+			Drop:  "drop",
+		}
+		_, err := str.Create(ctx, "params-"+doc.ID, "", doc, nil)
+		require.NoError(t, err)
+	}
+
+	listDocs := func(t *testing.T, prm *list.List) []memoryListParamsDoc {
+		t.Helper()
+
+		var got ResponseList[memoryListParamsDoc]
+		require.NoError(t, str.List(ctx, "", &got, prm))
+
+		return got.Items
+	}
+
+	t.Run("sort ascending and descending", func(t *testing.T) {
+		asc := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+		})
+		require.Len(t, asc, 13)
+		assert.Equal(t, 0, asc[0].Rank)
+		assert.Equal(t, 12, asc[12].Rank)
+
+		desc := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Desc}},
+		})
+		require.Len(t, desc, 13)
+		assert.Equal(t, 12, desc[0].Rank)
+		assert.Equal(t, 0, desc[12].Rank)
+	})
+
+	t.Run("multi-key sort breaks ties with second key", func(t *testing.T) {
+		got := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort: customsort.SortSlice{
+				{"group", customsort.Asc},
+				{"rank", customsort.Desc},
+			},
+		})
+		require.Len(t, got, 13)
+		assert.Equal(t, "a", got[0].Group)
+		assert.Equal(t, 11, got[0].Rank)
+		assert.Equal(t, 9, got[1].Rank)
+		assert.Equal(t, "b", got[6].Group)
+		assert.Equal(t, 12, got[6].Rank)
+	})
+
+	t.Run("offset alone", func(t *testing.T) {
+		assert.Len(t, listDocs(t, &list.List{Search: "params-*", Offset: 3}), 10)
+	})
+
+	t.Run("limit alone", func(t *testing.T) {
+		assert.Len(t, listDocs(t, &list.List{Search: "params-*", Limit: 4}), 4)
+	})
+
+	t.Run("offset and limit", func(t *testing.T) {
+		got := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+			Offset: 3,
+			Limit:  4,
+		})
+		require.Len(t, got, 4)
+		assert.Equal(t, []int{3, 4, 5, 6}, []int{got[0].Rank, got[1].Rank, got[2].Rank, got[3].Rank})
+	})
+
+	t.Run("fields projection", func(t *testing.T) {
+		var got ResponseList[map[string]any]
+		require.NoError(t, str.List(ctx, "", &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+			Fields: []string{"id"},
+		}))
+		require.Len(t, got.Items, 13)
+		assert.Equal(t, map[string]any{"id": "doc-00"}, got.Items[0])
+	})
+
+	t.Run("combined", func(t *testing.T) {
+		var got ResponseList[map[string]any]
+		require.NoError(t, str.List(ctx, "", &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Desc}},
+			Offset: 2,
+			Limit:  3,
+			Fields: []string{"id"},
+		}))
+		assert.Equal(t, []map[string]any{
+			{"id": "doc-10"},
+			{"id": "doc-09"},
+			{"id": "doc-08"},
+		}, got.Items)
+	})
+
+	t.Run("list.New default limits to ten", func(t *testing.T) {
+		prm, err := list.New()
+		require.NoError(t, err)
+		prm.Search = "params-*"
+
+		assert.Len(t, listDocs(t, prm), 10)
+	})
+
+	t.Run("nil params leave behavior unchanged", func(t *testing.T) {
+		assert.Len(t, listDocs(t, nil), 13)
+	})
+
+	t.Run("invalid sort order uses normal error path", func(t *testing.T) {
+		failedBefore := str.GetCounterListedFailed().Value()
+
+		var got ResponseList[memoryListParamsDoc]
+		err := str.List(ctx, "", &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", "sideways"}},
+		})
+		require.Error(t, err)
+		assert.Equal(t, failedBefore+1, str.GetCounterListedFailed().Value())
+	})
 }
 
 // A value planted directly in the underlying sync.Map with a non-[]byte type

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path"
@@ -50,6 +51,26 @@ type (
 	// Option is for the SFTP configuration.
 	Option = sftp.ClientOption
 )
+
+func readFile(client *sftp.Client, name string) ([]byte, error) {
+	file, err := client.Open(name)
+	if err != nil {
+		return nil, err
+	}
+
+	doc, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+
+	if readErr != nil {
+		return nil, readErr
+	}
+
+	if closeErr != nil {
+		return nil, closeErr
+	}
+
+	return doc, nil
+}
 
 // SFTP storage definition.
 type SFTP struct {
@@ -528,7 +549,7 @@ func (s *SFTP) List(ctx context.Context, target string, v any, prm *list.List, o
 		)
 	}
 
-	keys := ResponseListKeys{[]string{}}
+	docs := make([][]byte, 0, len(files))
 
 	// The documented contract is that Search filters the listing (Count
 	// already honors it). An empty search means match-all.
@@ -551,11 +572,24 @@ func (s *SFTP) List(ctx context.Context, target string, v any, prm *list.List, o
 		}
 
 		if matched {
-			keys.Keys = append(keys.Keys, file.Name())
+			doc, err := readFile(s.Client, path.Join(trgt, file.Name()))
+			if err != nil {
+				return customapm.TraceError(ctx, customerror.NewFailedToError(
+					storage.OperationList.String(),
+					customerror.WithError(err),
+				), s.GetLogger(), s.GetCounterListedFailed())
+			}
+
+			docs = append(docs, doc)
 		}
 	}
 
-	if err := storage.ParseToStruct(keys, v); err != nil {
+	docs, err = shared.ApplyListParams(docs, prm)
+	if err != nil {
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
+	}
+
+	if err := shared.Unmarshal(shared.AssembleItems(docs), v); err != nil {
 		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
 	}
 
