@@ -85,7 +85,13 @@ jobs:
       - name: Setup golangci-lint
         uses: golangci/golangci-lint-action@v8.0.0
         with:
-          version: v2.5.0
+          # Kept in step with the version developers run locally. When CI sat on
+          # v2.5.0 the two disagreed in both directions: newer gosec rules fired
+          # locally and needed //nolint, and v2.5.0 — which never raised those
+          # findings — then rejected the very same directives as unused via
+          # nolintlint. A locally-clean tree was not evidence CI was clean, and
+          # the reverse held too. Bump both together.
+          version: v2.12.2
           args: --timeout 10m -v -c .golangci.yml
 
       - name: Test
