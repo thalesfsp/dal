@@ -73,6 +73,8 @@ type MySQL struct {
 	// Config is the MySQL configuration.
 	Config *Config `json:"-"`
 
+	closeOnce sync.Once
+
 	// Target allows to set a static target. If it is empty, the target will be
 	// dynamic - the one set at the operation (count, create, delete, etc) time.
 	// Depending on the storage, target is a collection, a table, a bucket, etc.
@@ -884,8 +886,13 @@ func (m *MySQL) GetClient() any {
 
 // Close releases the resources held by the storage.
 func (m *MySQL) Close() error {
-	// TODO(v3): real implementation lands in C1b/C1c.
-	return nil
+	var err error
+
+	m.closeOnce.Do(func() {
+		err = m.Client.Close()
+	})
+
+	return err
 }
 
 //////

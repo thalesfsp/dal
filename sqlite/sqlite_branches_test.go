@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -95,6 +96,55 @@ func TestToSQLString(t *testing.T) {
 		_, err := ToSQLString(customsort.Sort("not-a-valid-sort-format"))
 		assert.Error(t, err)
 	})
+}
+
+func TestSQLite_Close(t *testing.T) {
+	t.Run("healthy and idempotent", func(t *testing.T) {
+		str, _ := newIsolatedStorage(t)
+
+		require.NoError(t, str.Close())
+		require.NoError(t, str.Close())
+	})
+
+	t.Run("concurrent", func(t *testing.T) {
+		str, _ := newIsolatedStorage(t)
+
+		const callers = 16
+
+		start := make(chan struct{})
+		errs := make(chan error, callers)
+		var wg sync.WaitGroup
+
+		wg.Add(callers)
+
+		for range callers {
+			go func() {
+				defer wg.Done()
+
+				<-start
+				errs <- str.Close()
+			}()
+		}
+
+		close(start)
+		wg.Wait()
+		close(errs)
+
+		for err := range errs {
+			require.NoError(t, err)
+		}
+	})
+}
+
+func TestSQLite_Close_OperationAfterCloseFails(t *testing.T) {
+	str, ctx := newIsolatedStorageWithTable(t)
+
+	require.NoError(t, str.Close())
+
+	var rows []shared.TestDataWithIDS
+	if err := str.List(ctx, shared.TableName, &rows, nil); err == nil {
+		t.Fatal("List after Close: expected an error, got nil")
+	}
 }
 
 //////
