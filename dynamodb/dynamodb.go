@@ -3,17 +3,17 @@ package dynamodb
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"sync"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
-	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	awsdynamodb "github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v3/internal/customapm"
@@ -65,7 +65,7 @@ type DynamoDB struct {
 	// structonly: skips validating *into* the client's fields (only checks
 	// non-nilness) - same reasoning as Config below applies to any live SDK
 	// state reachable from it.
-	Client *dynamodb.DynamoDB `json:"-" validate:"required,structonly"`
+	Client *awsdynamodb.Client `json:"-" validate:"required,structonly"`
 
 	// Config is the DynamoDB configuration.
 	//
@@ -178,9 +178,9 @@ func (d *DynamoDB) Count(ctx context.Context, target string, prm *count.Count, o
 	}
 
 	// Prepare scan input
-	scanInput := &dynamodb.ScanInput{
+	scanInput := &awsdynamodb.ScanInput{
 		TableName: aws.String(trgt),
-		Select:    aws.String(dynamodb.SelectCount),
+		Select:    types.SelectCount,
 	}
 
 	// Add filter if search is provided
@@ -197,8 +197,8 @@ func (d *DynamoDB) Count(ctx context.Context, target string, prm *count.Count, o
 
 		// Build filter expression for DynamoDB
 		var filterExpressions []string
-		expressionAttributeNames := make(map[string]*string)
-		expressionAttributeValues := make(map[string]*dynamodb.AttributeValue)
+		expressionAttributeNames := make(map[string]string)
+		expressionAttributeValues := make(map[string]types.AttributeValue)
 
 		for key, value := range filterMap {
 			placeholder := sanitizePlaceholder(key)
@@ -207,9 +207,9 @@ func (d *DynamoDB) Count(ctx context.Context, target string, prm *count.Count, o
 			attrValue := fmt.Sprintf(":%s", placeholder)
 
 			filterExpressions = append(filterExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
-			expressionAttributeNames[attrName] = aws.String(key)
+			expressionAttributeNames[attrName] = key
 
-			av, err := dynamodbattribute.Marshal(value)
+			av, err := attributevalue.Marshal(value)
 			if err != nil {
 				return 0, customapm.TraceError(
 					ctx,
@@ -231,8 +231,9 @@ func (d *DynamoDB) Count(ctx context.Context, target string, prm *count.Count, o
 	// Scan pages are capped at 1MB — paginate to count the whole table.
 	var count int64
 
-	for {
-		result, err := d.Client.ScanWithContext(ctx, scanInput)
+	paginator := awsdynamodb.NewScanPaginator(d.Client, scanInput)
+	for paginator.HasMorePages() {
+		result, err := paginator.NextPage(ctx)
 		if err != nil {
 			return 0, customapm.TraceError(
 				ctx,
@@ -242,15 +243,7 @@ func (d *DynamoDB) Count(ctx context.Context, target string, prm *count.Count, o
 			)
 		}
 
-		if result.Count != nil {
-			count += *result.Count
-		}
-
-		if len(result.LastEvaluatedKey) == 0 {
-			break
-		}
-
-		scanInput.ExclusiveStartKey = result.LastEvaluatedKey
+		count += int64(result.Count)
 	}
 
 	if o.PostHookFunc != nil {
@@ -350,7 +343,7 @@ func (d *DynamoDB) Delete(ctx context.Context, id, target string, prm *delete.De
 		}
 	}
 
-	key, err := dynamodbattribute.Marshal(id)
+	key, err := attributevalue.Marshal(id)
 	if err != nil {
 		return customapm.TraceError(
 			ctx,
@@ -360,14 +353,14 @@ func (d *DynamoDB) Delete(ctx context.Context, id, target string, prm *delete.De
 		)
 	}
 
-	deleteInput := &dynamodb.DeleteItemInput{
+	deleteInput := &awsdynamodb.DeleteItemInput{
 		TableName: aws.String(trgt),
-		Key: map[string]*dynamodb.AttributeValue{
+		Key: map[string]types.AttributeValue{
 			d.PrimaryKey: key,
 		},
 	}
 
-	if _, err := d.Client.DeleteItemWithContext(ctx, deleteInput); err != nil {
+	if _, err := d.Client.DeleteItem(ctx, deleteInput); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(
@@ -476,7 +469,7 @@ func (d *DynamoDB) Retrieve(ctx context.Context, id, target string, v any, prm *
 		}
 	}
 
-	key, err := dynamodbattribute.Marshal(id)
+	key, err := attributevalue.Marshal(id)
 	if err != nil {
 		return customapm.TraceError(
 			ctx,
@@ -486,14 +479,14 @@ func (d *DynamoDB) Retrieve(ctx context.Context, id, target string, v any, prm *
 		)
 	}
 
-	getInput := &dynamodb.GetItemInput{
+	getInput := &awsdynamodb.GetItemInput{
 		TableName: aws.String(trgt),
-		Key: map[string]*dynamodb.AttributeValue{
+		Key: map[string]types.AttributeValue{
 			d.PrimaryKey: key,
 		},
 	}
 
-	result, err := d.Client.GetItemWithContext(ctx, getInput)
+	result, err := d.Client.GetItem(ctx, getInput)
 	if err != nil {
 		return customapm.TraceError(
 			ctx,
@@ -513,7 +506,7 @@ func (d *DynamoDB) Retrieve(ctx context.Context, id, target string, v any, prm *
 	}
 
 	// Convert DynamoDB item to Go value.
-	if err := dynamodbattribute.UnmarshalMap(result.Item, v); err != nil {
+	if err := attributevalue.UnmarshalMap(result.Item, v); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError("unmarshal result", customerror.WithError(err)),
@@ -552,7 +545,7 @@ func (d *DynamoDB) Retrieve(ctx context.Context, id, target string, v any, prm *
 //
 // NOTE: It uses param.List.Any for DynamoDB filter expressions.
 //
-//nolint:gocognit,cyclop,funlen,gocyclo,maintidx
+//nolint:gocognit,cyclop,funlen,maintidx
 func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.List, opts ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.
@@ -611,19 +604,19 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 	// NOTE: Do NOT set Select=COUNT here: List must return the items
 	// themselves. (Select=COUNT makes DynamoDB omit Items entirely, and it is
 	// invalid when combined with a ProjectionExpression.)
-	scanInput := &dynamodb.ScanInput{
+	scanInput := &awsdynamodb.ScanInput{
 		TableName: aws.String(trgt),
 	}
 
 	// Fields projection
 	if len(finalParam.Fields) > 0 {
 		var projectionExpressions []string
-		expressionAttributeNames := make(map[string]*string)
+		expressionAttributeNames := make(map[string]string)
 
 		for _, field := range finalParam.Fields {
 			attrName := fmt.Sprintf("#%s", sanitizePlaceholder(field))
 			projectionExpressions = append(projectionExpressions, attrName)
-			expressionAttributeNames[attrName] = aws.String(field)
+			expressionAttributeNames[attrName] = field
 		}
 
 		scanInput.ProjectionExpression = aws.String(strings.Join(projectionExpressions, ", "))
@@ -632,16 +625,25 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 
 	// Limit
 	if finalParam.Limit > 0 {
-		scanInput.Limit = aws.Int64(int64(finalParam.Limit))
+		if finalParam.Limit > math.MaxInt32 {
+			return customapm.TraceError(
+				ctx,
+				customerror.NewFailedToError("limit exceeds DynamoDB maximum"),
+				d.GetLogger(),
+				d.GetCounterListedFailed(),
+			)
+		}
+
+		scanInput.Limit = aws.Int32(int32(finalParam.Limit))
 	}
 
 	// Filter
 	if filter, ok := finalParam.Any.(map[string]any); ok && len(filter) > 0 {
 		var filterExpressions []string
 		if scanInput.ExpressionAttributeNames == nil {
-			scanInput.ExpressionAttributeNames = make(map[string]*string)
+			scanInput.ExpressionAttributeNames = make(map[string]string)
 		}
-		expressionAttributeValues := make(map[string]*dynamodb.AttributeValue)
+		expressionAttributeValues := make(map[string]types.AttributeValue)
 
 		for key, value := range filter {
 			placeholder := sanitizePlaceholder(key)
@@ -650,9 +652,9 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 			attrValue := fmt.Sprintf(":f%s", placeholder)
 
 			filterExpressions = append(filterExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
-			scanInput.ExpressionAttributeNames[attrName] = aws.String(key)
+			scanInput.ExpressionAttributeNames[attrName] = key
 
-			av, err := dynamodbattribute.Marshal(value)
+			av, err := attributevalue.Marshal(value)
 			if err != nil {
 				return customapm.TraceError(
 					ctx,
@@ -680,19 +682,15 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 		}
 	}
 
-	var allItems []map[string]*dynamodb.AttributeValue
-	var lastEvaluatedKey map[string]*dynamodb.AttributeValue
+	var allItems []map[string]types.AttributeValue
 
 	// Handle pagination and offset
 	currentOffset := 0
 	targetOffset := finalParam.Offset
 
-	for {
-		if lastEvaluatedKey != nil {
-			scanInput.ExclusiveStartKey = lastEvaluatedKey
-		}
-
-		result, err := d.Client.ScanWithContext(ctx, scanInput)
+	paginator := awsdynamodb.NewScanPaginator(d.Client, scanInput)
+	for paginator.HasMorePages() {
+		result, err := paginator.NextPage(ctx)
 		if err != nil {
 			return customapm.TraceError(
 				ctx,
@@ -722,15 +720,10 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 		if finalParam.Limit > 0 && len(allItems) >= finalParam.Limit {
 			break
 		}
-
-		lastEvaluatedKey = result.LastEvaluatedKey
-		if len(lastEvaluatedKey) == 0 {
-			break
-		}
 	}
 
 	// Convert to the target type
-	if err := dynamodbattribute.UnmarshalListOfMaps(allItems, v); err != nil {
+	if err := attributevalue.UnmarshalListOfMaps(allItems, v); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError("unmarshal results", customerror.WithError(err)),
@@ -876,7 +869,7 @@ func (d *DynamoDB) Create(ctx context.Context, id, target string, v any, prm *cr
 		}
 	}
 
-	item, err := dynamodbattribute.MarshalMap(v)
+	item, err := attributevalue.MarshalMap(v)
 	if err != nil {
 		return "", customapm.TraceError(
 			ctx,
@@ -886,12 +879,12 @@ func (d *DynamoDB) Create(ctx context.Context, id, target string, v any, prm *cr
 		)
 	}
 
-	putInput := &dynamodb.PutItemInput{
+	putInput := &awsdynamodb.PutItemInput{
 		TableName: aws.String(trgt),
 		Item:      item,
 	}
 
-	if _, err := d.Client.PutItemWithContext(ctx, putInput); err != nil {
+	if _, err := d.Client.PutItem(ctx, putInput); err != nil {
 		return "", customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
@@ -998,7 +991,7 @@ func (d *DynamoDB) Update(ctx context.Context, id, target string, v any, prm *up
 	}
 
 	// Marshal the value to get all fields
-	item, err := dynamodbattribute.MarshalMap(v)
+	item, err := attributevalue.MarshalMap(v)
 	if err != nil {
 		return customapm.TraceError(
 			ctx,
@@ -1010,8 +1003,8 @@ func (d *DynamoDB) Update(ctx context.Context, id, target string, v any, prm *up
 
 	// Build update expression
 	updateExpressions := make([]string, 0, len(item))
-	expressionAttributeNames := make(map[string]*string)
-	expressionAttributeValues := make(map[string]*dynamodb.AttributeValue)
+	expressionAttributeNames := make(map[string]string)
+	expressionAttributeValues := make(map[string]types.AttributeValue)
 
 	for key, value := range item {
 		// Skip the primary key in updates
@@ -1025,7 +1018,7 @@ func (d *DynamoDB) Update(ctx context.Context, id, target string, v any, prm *up
 		attrValue := fmt.Sprintf(":%s", placeholder)
 
 		updateExpressions = append(updateExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
-		expressionAttributeNames[attrName] = aws.String(key)
+		expressionAttributeNames[attrName] = key
 		expressionAttributeValues[attrValue] = value
 	}
 
@@ -1038,7 +1031,7 @@ func (d *DynamoDB) Update(ctx context.Context, id, target string, v any, prm *up
 		)
 	}
 
-	key, err := dynamodbattribute.Marshal(id)
+	key, err := attributevalue.Marshal(id)
 	if err != nil {
 		return customapm.TraceError(
 			ctx,
@@ -1048,9 +1041,9 @@ func (d *DynamoDB) Update(ctx context.Context, id, target string, v any, prm *up
 		)
 	}
 
-	updateInput := &dynamodb.UpdateItemInput{
+	updateInput := &awsdynamodb.UpdateItemInput{
 		TableName: aws.String(trgt),
-		Key: map[string]*dynamodb.AttributeValue{
+		Key: map[string]types.AttributeValue{
 			d.PrimaryKey: key,
 		},
 		UpdateExpression:          aws.String("SET " + strings.Join(updateExpressions, ", ")),
@@ -1058,7 +1051,7 @@ func (d *DynamoDB) Update(ctx context.Context, id, target string, v any, prm *up
 		ExpressionAttributeValues: expressionAttributeValues,
 	}
 
-	if _, err := d.Client.UpdateItemWithContext(ctx, updateInput); err != nil {
+	if _, err := d.Client.UpdateItem(ctx, updateInput); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
@@ -1129,63 +1122,39 @@ func NewWithDynamicTable(ctx context.Context, region string, dynamicTableFunc Dy
 		return nil, err
 	}
 
-	// Create AWS session
-	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String(region),
-	})
-	if err != nil {
-		return nil, customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("create session", customerror.WithError(err)),
-			s.GetLogger(),
-			s.GetCounterPingFailed(),
-		)
-	}
-
-	// Apply custom config if provided
 	var finalConfig Config
 	if cfg != nil {
 		finalConfig = *cfg
 
 		// The region argument still applies when the custom config doesn't
 		// set one.
-		if finalConfig.Region == nil || *finalConfig.Region == "" {
-			finalConfig.Region = aws.String(region)
+		if finalConfig.Region == "" {
+			finalConfig.Region = region
 		}
-
-		sess, err = session.NewSession(&finalConfig)
+	} else {
+		finalConfig, err = awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
 		if err != nil {
 			return nil, customapm.TraceError(
 				ctx,
-				customerror.NewFailedToError("create session with config", customerror.WithError(err)),
+				customerror.NewFailedToError("load AWS configuration", customerror.WithError(err)),
 				s.GetLogger(),
 				s.GetCounterPingFailed(),
 			)
 		}
-	} else {
-		finalConfig = Config{Region: aws.String(region)}
 	}
 
 	// Create DynamoDB client
-	client := dynamodb.New(sess)
+	client := awsdynamodb.NewFromConfig(finalConfig)
 
 	// Test connection
 	r := retrier.New(retrier.ExponentialBackoff(3, shared.TimeoutPing), nil)
 
 	if err := r.RunCtx(ctx, func(ctx context.Context) error {
 		// Simple operation to test connectivity
-		_, err := client.ListTablesWithContext(ctx, &dynamodb.ListTablesInput{
-			Limit: aws.Int64(1),
+		_, err := client.ListTables(ctx, &awsdynamodb.ListTablesInput{
+			Limit: aws.Int32(1),
 		})
 		if err != nil {
-			var awsErr awserr.Error
-			if errors.As(err, &awsErr) {
-				// Check if it's a temporary error
-				if awsErr.Code() == "RequestLimitExceeded" || awsErr.Code() == "ServiceUnavailable" {
-					return err // Retryable
-				}
-			}
-
 			return err
 		}
 

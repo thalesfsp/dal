@@ -2,7 +2,8 @@
 package dynamodb
 
 import (
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 //////
@@ -10,13 +11,13 @@ import (
 //////
 
 // Item represents a DynamoDB item.
-type Item map[string]*dynamodb.AttributeValue
+type Item map[string]types.AttributeValue
 
 // Items represents a slice of DynamoDB items.
 type Items []Item
 
 // TableDescription represents DynamoDB table description.
-type TableDescription = dynamodb.TableDescription
+type TableDescription = types.TableDescription
 
 // CreateTableInput represents DynamoDB create table input.
 type CreateTableInput = dynamodb.CreateTableInput

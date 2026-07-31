@@ -6,9 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	awsdynamodb "github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/thalesfsp/dal/v3/internal/shared"
 	"github.com/thalesfsp/params/v2/count"
@@ -72,72 +74,73 @@ func TestNew(t *testing.T) {
 			defer cancel()
 
 			// Configure AWS config for testing
-			cfg := &aws.Config{
-				Region: aws.String(region),
-			}
+			cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+			assert.NoError(t, err)
 
 			// If testing locally with DynamoDB Local
 			if endpoint != "" {
-				cfg.Endpoint = aws.String(endpoint)
-				cfg.Credentials = credentials.NewStaticCredentials("test", "test", "")
+				cfg.BaseEndpoint = aws.String(endpoint)
+				cfg.Credentials = credentials.NewStaticCredentialsProvider("test", "test", "")
 			}
 
-			str, err := New(ctx, region, cfg)
+			str, err := New(ctx, region, &cfg)
 			assert.NoError(t, err)
 
 			// Create test table if it doesn't exist
-			client, ok := str.GetClient().(*dynamodb.DynamoDB)
+			client, ok := str.GetClient().(*awsdynamodb.Client)
 			assert.True(t, ok, "Failed to get DynamoDB client")
 
 			tableName := shared.TableName
-			createTableInput := &dynamodb.CreateTableInput{
+			createTableInput := &awsdynamodb.CreateTableInput{
 				TableName: aws.String(tableName),
-				KeySchema: []*dynamodb.KeySchemaElement{
+				KeySchema: []types.KeySchemaElement{
 					{
 						AttributeName: aws.String("id"),
-						KeyType:       aws.String(dynamodb.KeyTypeHash),
+						KeyType:       types.KeyTypeHash,
 					},
 				},
-				AttributeDefinitions: []*dynamodb.AttributeDefinition{
+				AttributeDefinitions: []types.AttributeDefinition{
 					{
 						AttributeName: aws.String("id"),
-						AttributeType: aws.String(dynamodb.ScalarAttributeTypeS),
+						AttributeType: types.ScalarAttributeTypeS,
 					},
 				},
-				BillingMode: aws.String(dynamodb.BillingModePayPerRequest),
+				BillingMode: types.BillingModePayPerRequest,
 			}
 
 			// Try to create table (ignore if it already exists)
-			_, err = client.CreateTableWithContext(ctx, createTableInput)
+			_, err = client.CreateTable(ctx, createTableInput)
 			if err != nil {
 				// Table might already exist, that's OK
 				t.Logf("Table creation result: %v", err)
 			} else {
 				// Wait for table to be active
-				err = client.WaitUntilTableExistsWithContext(ctx, &dynamodb.DescribeTableInput{
-					TableName: aws.String(tableName),
-				})
+				err = awsdynamodb.NewTableExistsWaiter(client).Wait(
+					ctx,
+					&awsdynamodb.DescribeTableInput{TableName: aws.String(tableName)},
+					time.Minute,
+				)
 				assert.NoError(t, err)
 			}
 
 			// Ensures the test table will be clean after the test even if it fails.
 			defer func() {
 				// Delete all items from the table
-				scanInput := &dynamodb.ScanInput{
+				scanInput := &awsdynamodb.ScanInput{
 					TableName: aws.String(tableName),
 				}
 
-				result, err := client.ScanWithContext(ctx, scanInput)
+				result, err := client.Scan(ctx, scanInput)
 				if err == nil {
 					for _, item := range result.Items {
 						if idAttr, ok := item["id"]; ok {
-							deleteInput := &dynamodb.DeleteItemInput{
+							deleteInput := &awsdynamodb.DeleteItemInput{
 								TableName: aws.String(tableName),
-								Key: map[string]*dynamodb.AttributeValue{
+								Key: map[string]types.AttributeValue{
 									"id": idAttr,
 								},
 							}
-							_, err := client.DeleteItemWithContext(ctx, deleteInput)
+							_, err := client.DeleteItem(ctx, deleteInput)
 							assert.NoError(t, err, "Failed to delete item during cleanup")
 						}
 					}
