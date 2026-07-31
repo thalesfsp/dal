@@ -185,9 +185,7 @@ func (m *MongoDB) Count(ctx context.Context, target string, prm *count.Count, op
 		return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Filter.
@@ -332,9 +330,7 @@ func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Del
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -448,9 +444,7 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -590,9 +584,7 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	// Query params.
 	cursorOpts := options.Find()
@@ -769,9 +761,7 @@ func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *cre
 		return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -882,9 +872,7 @@ func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *upd
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.

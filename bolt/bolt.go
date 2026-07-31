@@ -194,9 +194,7 @@ func (s *Bolt) Count(ctx context.Context, target string, prm *count.Count, optio
 	// Application's default values.
 	finalParam.Search = "*"
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -338,9 +336,7 @@ func (s *Bolt) Delete(ctx context.Context, id, target string, prm *delete.Delete
 	}
 
 	// Application's default values.
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -454,9 +450,7 @@ func (s *Bolt) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -580,9 +574,7 @@ func (s *Bolt) List(ctx context.Context, target string, v any, prm *list.List, o
 	// Application's default values.
 	finalParam.Search = "*"
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -731,9 +723,7 @@ func (s *Bolt) Create(ctx context.Context, id, target string, v any, prm *create
 
 	finalParam.TTL = 0
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -855,9 +845,7 @@ func (s *Bolt) Update(ctx context.Context, id, target string, v any, prm *update
 
 	finalParam.TTL = 0
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.

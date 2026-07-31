@@ -343,13 +343,11 @@ func TestCount_TargetResolutionFailure(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestCount_BuildQueryError(t *testing.T) {
+func TestCount_EmptySearchKeepsDefault(t *testing.T) {
 	es, _, _ := newTestES(t, "idx")
 
-	// Bypasses count.New()'s `Search required` validation by constructing
-	// the struct directly, exercising buildQuery's own empty-search guard.
 	_, err := es.Count(t.Context(), "idx", &count.Count{Search: ""})
-	require.Error(t, err)
+	require.NoError(t, err)
 }
 
 func TestCount_TransportError(t *testing.T) {
@@ -654,13 +652,13 @@ func TestList_AnyValueListAny(t *testing.T) {
 	assert.Contains(t, srv.Last().Body, `"track_total_hits": true`)
 }
 
-func TestList_BuildQueryError(t *testing.T) {
+func TestList_EmptySearchKeepsDefault(t *testing.T) {
 	es, _, _ := newTestES(t, "idx")
 
 	var items []shared.TestDataS
 
 	err := es.List(t.Context(), "idx", &items, &list.List{Search: ""})
-	require.Error(t, err)
+	require.NoError(t, err)
 }
 
 func TestList_OptionError(t *testing.T) {
