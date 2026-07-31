@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thalesfsp/customerror"
-	"github.com/thalesfsp/dal/v2/storage"
+	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/delete"

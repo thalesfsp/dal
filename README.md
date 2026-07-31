@@ -39,7 +39,7 @@ running backend.
 
 ## Install
 
-`go get github.com/thalesfsp/dal/v2/storage`
+`go get github.com/thalesfsp/dal/v3/storage`
 
 ## Contributing
 

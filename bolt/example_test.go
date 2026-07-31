@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/thalesfsp/dal/v2/bolt"
+	"github.com/thalesfsp/dal/v3/bolt"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/delete"

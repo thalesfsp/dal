@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thalesfsp/dal/v2/internal/shared"
+	"github.com/thalesfsp/dal/v3/internal/shared"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/list"
 )

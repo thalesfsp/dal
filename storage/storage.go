@@ -5,9 +5,9 @@ import (
 	"expvar"
 	"fmt"
 
-	"github.com/thalesfsp/dal/v2/internal/customapm"
-	"github.com/thalesfsp/dal/v2/internal/logging"
-	"github.com/thalesfsp/dal/v2/internal/metrics"
+	"github.com/thalesfsp/dal/v3/internal/customapm"
+	"github.com/thalesfsp/dal/v3/internal/logging"
+	"github.com/thalesfsp/dal/v3/internal/metrics"
 	"github.com/thalesfsp/status"
 	"github.com/thalesfsp/sypl/v2"
 	"github.com/thalesfsp/sypl/v2/level"

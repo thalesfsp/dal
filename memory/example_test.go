@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/thalesfsp/dal/v2/memory"
+	"github.com/thalesfsp/dal/v3/memory"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/delete"
