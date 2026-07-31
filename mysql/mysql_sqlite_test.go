@@ -218,6 +218,44 @@ func TestSingletonGetSet(t *testing.T) {
 	assert.Equal(t, storage.IStorage(str), Get())
 }
 
+func TestClose(t *testing.T) {
+	t.Run("healthy and idempotent", func(t *testing.T) {
+		str := newSQLiteStorage(t)
+
+		require.NoError(t, str.Close())
+		require.NoError(t, str.Close())
+	})
+
+	t.Run("concurrent", func(t *testing.T) {
+		str := newSQLiteStorage(t)
+
+		const callers = 16
+
+		start := make(chan struct{})
+		errs := make(chan error, callers)
+		var wg sync.WaitGroup
+
+		wg.Add(callers)
+
+		for range callers {
+			go func() {
+				defer wg.Done()
+
+				<-start
+				errs <- str.Close()
+			}()
+		}
+
+		close(start)
+		wg.Wait()
+		close(errs)
+
+		for err := range errs {
+			require.NoError(t, err)
+		}
+	})
+}
+
 //////
 // Table/database helpers.
 //////

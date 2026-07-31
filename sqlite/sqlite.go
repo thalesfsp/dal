@@ -70,6 +70,8 @@ type SQLite struct {
 	// Config is the postgres configuration.
 	Config *Config `json:"-"`
 
+	closeOnce sync.Once
+
 	// Target allows to set a static target. If it is empty, the target will be
 	// dynamic - the one set at the operation (count, create, delete, etc) time.
 	// Depending on the storage, target is a collection, a table, a bucket, etc.
@@ -874,8 +876,13 @@ func (p *SQLite) GetClient() any {
 
 // Close releases the resources held by the storage.
 func (p *SQLite) Close() error {
-	// TODO(v3): real implementation lands in C1b/C1c.
-	return nil
+	var err error
+
+	p.closeOnce.Do(func() {
+		err = p.Client.Close()
+	})
+
+	return err
 }
 
 //////
