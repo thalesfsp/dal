@@ -97,7 +97,7 @@ func IsProvisionedThroughputExceededError(err error) bool {
 }
 
 // BuildFilterExpression builds a DynamoDB filter expression from a map of conditions.
-func BuildFilterExpression(conditions map[string]interface{}) (
+func BuildFilterExpression(conditions map[string]any) (
 	*string,
 	map[string]*string,
 	map[string]*dynamodb.AttributeValue,
@@ -140,7 +140,7 @@ func BuildFilterExpression(conditions map[string]interface{}) (
 }
 
 // BuildUpdateExpression builds a DynamoDB update expression from a map of fields to update.
-func BuildUpdateExpression(updates map[string]interface{}, primaryKey string) (
+func BuildUpdateExpression(updates map[string]any, primaryKey string) (
 	*string,
 	map[string]*string,
 	map[string]*dynamodb.AttributeValue,
@@ -211,22 +211,22 @@ func BuildProjectionExpression(fields []string) (*string, map[string]*string) {
 }
 
 // MarshalItem marshals a Go value to a DynamoDB item.
-func MarshalItem(v interface{}) (map[string]*dynamodb.AttributeValue, error) {
+func MarshalItem(v any) (map[string]*dynamodb.AttributeValue, error) {
 	return dynamodbattribute.MarshalMap(v)
 }
 
 // UnmarshalItem unmarshals a DynamoDB item to a Go value.
-func UnmarshalItem(item map[string]*dynamodb.AttributeValue, v interface{}) error {
+func UnmarshalItem(item map[string]*dynamodb.AttributeValue, v any) error {
 	return dynamodbattribute.UnmarshalMap(item, v)
 }
 
 // UnmarshalItems unmarshals a slice of DynamoDB items to a slice of Go values.
-func UnmarshalItems(items []map[string]*dynamodb.AttributeValue, v interface{}) error {
+func UnmarshalItems(items []map[string]*dynamodb.AttributeValue, v any) error {
 	return dynamodbattribute.UnmarshalListOfMaps(items, v)
 }
 
 // MarshalKey marshals a key value for DynamoDB operations.
-func MarshalKey(keyName string, keyValue interface{}) (map[string]*dynamodb.AttributeValue, error) {
+func MarshalKey(keyName string, keyValue any) (map[string]*dynamodb.AttributeValue, error) {
 	av, err := dynamodbattribute.Marshal(keyValue)
 	if err != nil {
 		return nil, err

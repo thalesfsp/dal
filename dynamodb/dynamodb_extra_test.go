@@ -334,7 +334,7 @@ func TestDynamoDB_Create(t *testing.T) {
 	})
 
 	t.Run("map-value-no-pk-autoset", func(t *testing.T) {
-		v := map[string]interface{}{"id": "map-1", "name": "delta"}
+		v := map[string]any{"id": "map-1", "name": "delta"}
 
 		id, err := str.Create(t.Context(), "map-1", table, v, &create.Create{})
 		require.NoError(t, err)
@@ -352,7 +352,7 @@ func TestDynamoDB_Create(t *testing.T) {
 		// ("map key cannot be empty") - most Go values marshal into
 		// *something*, so this is the reliable way to hit MarshalMap's
 		// error branch.
-		_, err := str.Create(t.Context(), "bad-1", table, map[string]interface{}{"": "x"}, &create.Create{})
+		_, err := str.Create(t.Context(), "bad-1", table, map[string]any{"": "x"}, &create.Create{})
 		require.Error(t, err)
 		assert.EqualValues(t, before+1, str.GetCounterCreatedFailed().Value())
 	})
@@ -450,7 +450,7 @@ func TestDynamoDB_Update(t *testing.T) {
 	t.Run("marshal-error", func(t *testing.T) {
 		before := str.GetCounterUpdatedFailed().Value()
 
-		err := str.Update(t.Context(), "u1", table, map[string]interface{}{"": "x"}, &update.Update{})
+		err := str.Update(t.Context(), "u1", table, map[string]any{"": "x"}, &update.Update{})
 		require.Error(t, err)
 		assert.EqualValues(t, before+1, str.GetCounterUpdatedFailed().Value())
 	})
@@ -910,7 +910,7 @@ func TestDynamoDB_List(t *testing.T) {
 	t.Run("filter-sanitizes-unsafe-names", func(t *testing.T) {
 		var got []dynamoDoc
 
-		require.NoError(t, str.List(t.Context(), table, &got, &list.List{Any: map[string]interface{}{"created-at": "2020-01-01"}}))
+		require.NoError(t, str.List(t.Context(), table, &got, &list.List{Any: map[string]any{"created-at": "2020-01-01"}}))
 
 		reqs := fake.scanRequests()
 		require.NotEmpty(t, reqs)

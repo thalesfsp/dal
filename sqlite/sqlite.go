@@ -340,7 +340,7 @@ func (p *SQLite) Delete(ctx context.Context, id, target string, prm *delete.Dele
 		)
 	}
 
-	if _, err := p.Client.ExecContext(ctx, selectSQL, args...); err != nil {
+	if _, err := p.Client.ExecContext(ctx, selectSQL, args...); err != nil { //nolint:gosec // goqu quotes the table identifier and parameterizes all values in selectSQL.
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationDelete.String(), customerror.WithError(err)),
@@ -701,7 +701,7 @@ func (p *SQLite) Create(ctx context.Context, id, target string, v any, prm *crea
 
 	// Execute the query.
 	var returnedID string
-	if err := p.Client.QueryRowContext(ctx, insertSQL, args...).Scan(&returnedID); err != nil {
+	if err := p.Client.QueryRowContext(ctx, insertSQL, args...).Scan(&returnedID); err != nil { //nolint:gosec // goqu quotes the table identifier and parameterizes all values in insertSQL.
 		return "", customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
@@ -821,7 +821,7 @@ func (p *SQLite) Update(ctx context.Context, id, target string, v any, prm *upda
 		)
 	}
 
-	res, err := p.Client.ExecContext(ctx, updateSQL, args...)
+	res, err := p.Client.ExecContext(ctx, updateSQL, args...) //nolint:gosec // goqu quotes the table identifier and parameterizes all values in updateSQL.
 	if err != nil {
 		return customapm.TraceError(
 			ctx,

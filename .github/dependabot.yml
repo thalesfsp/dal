@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # `gomod` is the ecosystem identifier Dependabot accepts; the previous value
+  # ("golang") is not one. It went unnoticed because this file lived under
+  # .github/workflows/, where Dependabot never read it and GitHub instead tried
+  # to execute it as a workflow — failing on every push, including to main.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 5

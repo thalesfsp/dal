@@ -34,8 +34,12 @@ import (
 // Const, vars, and types.
 //////
 
-// Name of the storage.
-const Name = "elasticsearch"
+const (
+	// Name of the storage.
+	Name = "elasticsearch"
+
+	matchAllQuery = `{"match_all" : {} }`
+)
 
 // Singleton.
 var (
@@ -138,12 +142,12 @@ func buildQuery(params *list.List, addons ...string) (string, error) {
 
 	// Append the offset query parameter, if any.
 	if params.Offset > 0 {
-		builder.WriteString(fmt.Sprintf(`, "from": %d`, params.Offset))
+		fmt.Fprintf(&builder, `, "from": %d`, params.Offset)
 	}
 
 	// Append the limit query parameter, if any.
 	if params.Limit > 0 {
-		builder.WriteString(fmt.Sprintf(`, "size": %d`, params.Limit))
+		fmt.Fprintf(&builder, `, "size": %d`, params.Limit)
 	}
 
 	// Check if prm.Any is type of ListAny (pointer or value).
@@ -270,7 +274,7 @@ func (es *ElasticSearch) Count(ctx context.Context, target string, prm *count.Co
 		return 0, customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCountedFailed())
 	}
 
-	finalParam.Search = `{"match_all" : {} }`
+	finalParam.Search = matchAllQuery
 
 	if prm != nil {
 		finalParam = prm
@@ -338,7 +342,7 @@ func (es *ElasticSearch) Count(ctx context.Context, target string, prm *count.Co
 	}
 
 	// Parse the response.
-	var mapResp map[string]interface{}
+	var mapResp map[string]any
 
 	// Decode the JSON response and using a pointer.
 	if err := shared.Decode(res.Body, &mapResp); err != nil {
@@ -348,8 +352,8 @@ func (es *ElasticSearch) Count(ctx context.Context, target string, prm *count.Co
 	// Access the value of the "total" field.
 	var total int
 
-	if hits, ok := mapResp["hits"].(map[string]interface{}); ok {
-		if totalHits, ok := hits["total"].(map[string]interface{}); ok {
+	if hits, ok := mapResp["hits"].(map[string]any); ok {
+		if totalHits, ok := hits["total"].(map[string]any); ok {
 			if value, ok := totalHits["value"].(float64); ok {
 				total = int(value)
 			}
@@ -679,7 +683,7 @@ func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *li
 		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterListedFailed())
 	}
 
-	finalParam.Search = `{"match_all" : {} }`
+	finalParam.Search = matchAllQuery
 
 	if prm != nil {
 		finalParam = prm
@@ -742,7 +746,7 @@ func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *li
 	// Parse response body.
 	// Iterate the document "hits" returned by API call
 	// Instantiate a mapping interface for API response
-	var mapResp map[string]interface{}
+	var mapResp map[string]any
 
 	// Decode the JSON response and using a pointer
 	if err := shared.Decode(res.Body, &mapResp); err != nil {
@@ -751,8 +755,8 @@ func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *li
 
 	// Extract the total count and associate it with prm.Total
 	if prm != nil {
-		if hits, ok := mapResp["hits"].(map[string]interface{}); ok {
-			if totalHits, ok := hits["total"].(map[string]interface{}); ok {
+		if hits, ok := mapResp["hits"].(map[string]any); ok {
+			if totalHits, ok := hits["total"].(map[string]any); ok {
 				if value, ok := totalHits["value"].(float64); ok {
 					prm.Count = int64(value)
 				}
@@ -764,7 +768,7 @@ func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *li
 
 	// Assert in two checked steps: chaining them panics outright when `hits`
 	// is absent or not an object.
-	hitsField, ok := mapResp["hits"].(map[string]interface{})
+	hitsField, ok := mapResp["hits"].(map[string]any)
 	if !ok {
 		return customapm.TraceError(
 			ctx,
@@ -774,7 +778,7 @@ func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *li
 		)
 	}
 
-	mapHits, ok := hitsField["hits"].([]interface{})
+	mapHits, ok := hitsField["hits"].([]any)
 	if !ok {
 		return customapm.TraceError(
 			ctx,
@@ -785,9 +789,9 @@ func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *li
 	}
 
 	for _, hit := range mapHits {
-		var doc map[string]interface{}
+		var doc map[string]any
 
-		if h, ok := hit.(map[string]interface{}); ok {
+		if h, ok := hit.(map[string]any); ok {
 			doc = h
 		} else {
 			return customapm.TraceError(
@@ -1043,7 +1047,7 @@ func (es *ElasticSearch) Update(ctx context.Context, id, target string, v any, p
 	res, err := es.Client.Update(
 		trgt,
 		id,
-		bytes.NewReader([]byte(fmt.Sprintf(`{"doc":%s}`, valueAsJSON))),
+		bytes.NewReader(fmt.Appendf(nil, `{"doc":%s}`, valueAsJSON)),
 		reqOpts...,
 	)
 	if err != nil {

@@ -2,7 +2,7 @@ package elasticsearch
 
 // ResponseSourceFromES is the data from the Elasticsearch response.
 type ResponseSourceFromES struct {
-	Data interface{} `json:"_source"`
+	Data any `json:"_source"`
 }
 
 // ResponseErrorFromESReason is the reason from the Elasticsearch response.

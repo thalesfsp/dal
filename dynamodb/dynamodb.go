@@ -185,7 +185,7 @@ func (d *DynamoDB) Count(ctx context.Context, target string, prm *count.Count, o
 
 	// Add filter if search is provided
 	if finalParam.Search != "" {
-		filterMap := map[string]interface{}{}
+		filterMap := map[string]any{}
 		if err := shared.Unmarshal([]byte(finalParam.Search), &filterMap); err != nil {
 			return 0, customapm.TraceError(
 				ctx,
@@ -636,7 +636,7 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 	}
 
 	// Filter
-	if filter, ok := finalParam.Any.(map[string]interface{}); ok && len(filter) > 0 {
+	if filter, ok := finalParam.Any.(map[string]any); ok && len(filter) > 0 {
 		var filterExpressions []string
 		if scanInput.ExpressionAttributeNames == nil {
 			scanInput.ExpressionAttributeNames = make(map[string]*string)
@@ -842,7 +842,7 @@ func (d *DynamoDB) Create(ctx context.Context, id, target string, v any, prm *cr
 
 	// Ensure the primary key is set in the item
 	val := reflect.ValueOf(v)
-	if val.Kind() == reflect.Ptr {
+	if val.Kind() == reflect.Pointer {
 		val = val.Elem()
 	}
 
