@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -26,9 +27,9 @@ import (
 	"github.com/thalesfsp/sypl/v2/fields"
 	"github.com/thalesfsp/sypl/v2/level"
 	"github.com/thalesfsp/validation"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 //////
@@ -100,6 +101,42 @@ func ToMongoString(s customsort.Sort) (bson.D, error) {
 	}
 
 	return sortFields, nil
+}
+
+// decodeCursor iterates cursor into the slice pointed to by v. The destination
+// is only updated after the cursor is exhausted successfully, so a getMore
+// error cannot return a partial result as a successful list.
+func decodeCursor(ctx context.Context, cursor *mongo.Cursor, v any) error {
+	resultsValue := reflect.ValueOf(v)
+	if resultsValue.Kind() != reflect.Pointer || resultsValue.IsNil() {
+		return fmt.Errorf("results argument must be a non-nil pointer to a slice")
+	}
+
+	sliceValue := resultsValue.Elem()
+	if sliceValue.Kind() != reflect.Slice {
+		return fmt.Errorf("results argument must be a pointer to a slice, but was a pointer to %s", sliceValue.Kind())
+	}
+
+	elementType := sliceValue.Type().Elem()
+	decoded := reflect.Zero(sliceValue.Type())
+
+	for cursor.Next(ctx) {
+		element := reflect.New(elementType)
+
+		if err := cursor.Decode(element.Interface()); err != nil {
+			return err
+		}
+
+		decoded = reflect.Append(decoded, element.Elem())
+	}
+
+	if err := cursor.Err(); err != nil {
+		return err
+	}
+
+	sliceValue.Set(decoded)
+
+	return nil
 }
 
 //////
@@ -640,10 +677,10 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 
 	defer cursor.Close(ctx)
 
-	if err := cursor.All(ctx, v); err != nil {
+	if err := decodeCursor(ctx, cursor, v); err != nil {
 		return customapm.TraceError(
 			ctx,
-			customerror.NewFailedToError("cursor all", customerror.WithError(err)),
+			customerror.NewFailedToError("cursor iteration", customerror.WithError(err)),
 			m.GetLogger(),
 			m.GetCounterListedFailed(),
 		)
@@ -957,7 +994,7 @@ func New(ctx context.Context, db string, cfg *Config) (*MongoDB, error) {
 		return nil, err
 	}
 
-	client, err := mongo.Connect(ctx, cfg)
+	client, err := mongo.Connect(cfg)
 	if err != nil {
 		return nil, customapm.TraceError(
 			ctx,

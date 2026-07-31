@@ -1,10 +1,9 @@
 package mongodb
 
-// Offline unit tests for the MongoDB adapter. They run the REAL driver against
-// the in-memory mock deployment defined in mockdeployment_test.go (see the
-// comment there for why mtest.New itself cannot be used under `-short`), so
-// every code path - command building, response decoding, error mapping,
-// metrics - is exercised without Docker or network access.
+// Offline unit tests for the MongoDB adapter. They run the real driver against
+// the in-memory mock deployment defined in mockdeployment_test.go, so every
+// code path - command building, response decoding, error mapping, metrics - is
+// exercised without Docker or network access.
 
 import (
 	"context"
@@ -25,10 +24,9 @@ import (
 	"github.com/thalesfsp/params/v2/list"
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 const (
@@ -53,7 +51,7 @@ type testDoc struct {
 func newMockedStorage(t *testing.T) (*MongoDB, *mockDeployment) {
 	t.Helper()
 
-	dep := newMockDeployment(mtest.CreateSuccessResponse()) // consumed by ping.
+	dep := newMockDeployment(mockCreateSuccessResponse()) // consumed by ping.
 
 	cfg := options.Client()
 	// Deployment is the only exported seam for an offline driver: setting it
@@ -114,6 +112,7 @@ func TestNewOffline(t *testing.T) {
 		client, ok := st.GetClient().(*mongo.Client)
 		require.True(t, ok)
 		assert.Same(t, st.Client, client)
+		assert.NoError(t, st.Close())
 
 		// New must have stored the instance in the singleton.
 		assert.Same(t, storage.IStorage(st), Get())
@@ -153,7 +152,7 @@ func TestNewOffline(t *testing.T) {
 	})
 
 	t.Run("validation failure disconnects the created client", func(t *testing.T) {
-		dep := newMockDeployment(mtest.CreateSuccessResponse()) // ping succeeds.
+		dep := newMockDeployment(mockCreateSuccessResponse()) // ping succeeds.
 
 		cfg := options.Client()
 		// Same mock seam as newMockedStorage.
@@ -214,7 +213,7 @@ func TestToMongoString(t *testing.T) {
 
 // countResponse is the aggregate cursor response CountDocuments expects.
 func countResponse(n int32) bson.D {
-	return mtest.CreateCursorResponse(0, testNS, mtest.FirstBatch, bson.D{{Key: "n", Value: n}})
+	return mockCreateCursorResponse(0, mockFirstBatch, bson.D{{Key: "n", Value: n}})
 }
 
 func TestCountOffline(t *testing.T) {
@@ -276,7 +275,7 @@ func TestCountOffline(t *testing.T) {
 	t.Run("command error", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateCommandErrorResponse(mtest.CommandError{
+		dep.addResponses(mockCreateCommandErrorResponse(mockCommandError{
 			Code:    8000,
 			Name:    "AtlasError",
 			Message: "count failed",
@@ -288,6 +287,20 @@ func TestCountOffline(t *testing.T) {
 			require.Error(t, err)
 			assert.Zero(t, got)
 			assert.Contains(t, err.Error(), "count failed")
+		})
+	})
+
+	t.Run("context cancellation", func(t *testing.T) {
+		st, _ := newMockedStorage(t)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		requireCounterIncremented(t, st.GetCounterCountedFailed(), func() {
+			got, err := st.Count(ctx, testColl, nil)
+
+			require.ErrorIs(t, err, context.Canceled)
+			assert.Zero(t, got)
 		})
 	})
 
@@ -365,7 +378,7 @@ func TestCreateOffline(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateSuccessResponse())
+		dep.addResponses(mockCreateSuccessResponse())
 
 		requireCounterIncremented(t, st.GetCounterCreated(), func() {
 			id, err := st.Create(t.Context(), doc.ID, testColl, doc, &create.Create{})
@@ -378,7 +391,7 @@ func TestCreateOffline(t *testing.T) {
 	t.Run("success with nil params and hooks", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateSuccessResponse())
+		dep.addResponses(mockCreateSuccessResponse())
 
 		var hookCalls int
 
@@ -401,7 +414,7 @@ func TestCreateOffline(t *testing.T) {
 	t.Run("write error", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateWriteErrorsResponse(mtest.WriteError{
+		dep.addResponses(mockCreateWriteErrorsResponse(mockWriteError{
 			Index:   0,
 			Code:    11000,
 			Message: "duplicate key",
@@ -413,6 +426,7 @@ func TestCreateOffline(t *testing.T) {
 			require.Error(t, err)
 			assert.Empty(t, id)
 			assert.Contains(t, err.Error(), "duplicate key")
+			assert.True(t, mongo.IsDuplicateKeyError(err))
 		})
 	})
 
@@ -464,7 +478,7 @@ func TestRetrieveOffline(t *testing.T) {
 	t.Run("found", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateCursorResponse(0, testNS, mtest.FirstBatch, stored))
+		dep.addResponses(mockCreateCursorResponse(0, mockFirstBatch, stored))
 
 		var got testDoc
 
@@ -493,7 +507,7 @@ func TestRetrieveOffline(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
 		// Empty first batch -> mongo.ErrNoDocuments.
-		dep.addResponses(mtest.CreateCursorResponse(0, testNS, mtest.FirstBatch))
+		dep.addResponses(mockCreateCursorResponse(0, mockFirstBatch))
 
 		var got testDoc
 
@@ -507,7 +521,7 @@ func TestRetrieveOffline(t *testing.T) {
 	t.Run("command error", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateCommandErrorResponse(mtest.CommandError{
+		dep.addResponses(mockCreateCommandErrorResponse(mockCommandError{
 			Code:    8000,
 			Name:    "AtlasError",
 			Message: "find failed",
@@ -526,7 +540,7 @@ func TestRetrieveOffline(t *testing.T) {
 	t.Run("undecodable destination", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateCursorResponse(0, testNS, mtest.FirstBatch, stored))
+		dep.addResponses(mockCreateCursorResponse(0, mockFirstBatch, stored))
 
 		// A document cannot be unmarshaled into an *int.
 		got := new(int)
@@ -580,7 +594,7 @@ func TestUpdateOffline(t *testing.T) {
 	t.Run("matched", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateSuccessResponse(
+		dep.addResponses(mockCreateSuccessResponse(
 			bson.E{Key: "n", Value: 1},
 			bson.E{Key: "nModified", Value: 1},
 		))
@@ -608,7 +622,7 @@ func TestUpdateOffline(t *testing.T) {
 	t.Run("no match is 404", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateSuccessResponse(
+		dep.addResponses(mockCreateSuccessResponse(
 			bson.E{Key: "n", Value: 0},
 			bson.E{Key: "nModified", Value: 0},
 		))
@@ -623,7 +637,7 @@ func TestUpdateOffline(t *testing.T) {
 	t.Run("command error", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateCommandErrorResponse(mtest.CommandError{
+		dep.addResponses(mockCreateCommandErrorResponse(mockCommandError{
 			Code:    8000,
 			Name:    "AtlasError",
 			Message: "update failed",
@@ -688,7 +702,7 @@ func TestDeleteOffline(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateSuccessResponse(bson.E{Key: "n", Value: 1}))
+		dep.addResponses(mockCreateSuccessResponse(bson.E{Key: "n", Value: 1}))
 
 		var hookCalls int
 
@@ -715,7 +729,7 @@ func TestDeleteOffline(t *testing.T) {
 
 		// DeletedCount is not inspected by the adapter: deleting a missing
 		// document is NOT an error (unlike Update, which maps it to 404).
-		dep.addResponses(mtest.CreateSuccessResponse(bson.E{Key: "n", Value: 0}))
+		dep.addResponses(mockCreateSuccessResponse(bson.E{Key: "n", Value: 0}))
 
 		requireCounterIncremented(t, st.GetCounterDeleted(), func() {
 			require.NoError(t, st.Delete(t.Context(), "id-1", testColl, &delete.Delete{}))
@@ -725,7 +739,7 @@ func TestDeleteOffline(t *testing.T) {
 	t.Run("command error", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateCommandErrorResponse(mtest.CommandError{
+		dep.addResponses(mockCreateCommandErrorResponse(mockCommandError{
 			Code:    8000,
 			Name:    "AtlasError",
 			Message: "delete failed",
@@ -778,6 +792,22 @@ func listDoc(id, name string) bson.D {
 	}
 }
 
+func TestDecodeCursorRejectsInvalidDestination(t *testing.T) {
+	require.EqualError(
+		t,
+		decodeCursor(t.Context(), nil, nil),
+		"results argument must be a non-nil pointer to a slice",
+	)
+
+	var notASlice int
+
+	require.EqualError(
+		t,
+		decodeCursor(t.Context(), nil, &notASlice),
+		"results argument must be a pointer to a slice, but was a pointer to int",
+	)
+}
+
 func TestListOffline(t *testing.T) {
 	t.Run("multiple batches with full params", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
@@ -785,8 +815,8 @@ func TestListOffline(t *testing.T) {
 		// find -> first batch (cursor stays open), getMore -> final batch
 		// (cursor id 0 closes it, so no killCursors is issued).
 		dep.addResponses(
-			mtest.CreateCursorResponse(7, testNS, mtest.FirstBatch, listDoc("id-1", "a"), listDoc("id-2", "b")),
-			mtest.CreateCursorResponse(0, testNS, mtest.NextBatch, listDoc("id-3", "c")),
+			mockCreateCursorResponse(7, mockFirstBatch, listDoc("id-1", "a"), listDoc("id-2", "b")),
+			mockCreateCursorResponse(0, mockNextBatch, listDoc("id-3", "c")),
 		)
 
 		prm := &list.List{
@@ -824,7 +854,7 @@ func TestListOffline(t *testing.T) {
 	t.Run("nil params uses defaults", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateCursorResponse(0, testNS, mtest.FirstBatch, listDoc("id-1", "a")))
+		dep.addResponses(mockCreateCursorResponse(0, mockFirstBatch, listDoc("id-1", "a")))
 
 		var got []testDoc
 
@@ -847,7 +877,7 @@ func TestListOffline(t *testing.T) {
 	t.Run("command error", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateCommandErrorResponse(mtest.CommandError{
+		dep.addResponses(mockCreateCommandErrorResponse(mockCommandError{
 			Code:    8000,
 			Name:    "AtlasError",
 			Message: "find failed",
@@ -866,7 +896,7 @@ func TestListOffline(t *testing.T) {
 	t.Run("cursor decode error", func(t *testing.T) {
 		st, dep := newMockedStorage(t)
 
-		dep.addResponses(mtest.CreateCursorResponse(0, testNS, mtest.FirstBatch, listDoc("id-1", "a")))
+		dep.addResponses(mockCreateCursorResponse(0, mockFirstBatch, listDoc("id-1", "a")))
 
 		// Documents cannot be decoded into ints.
 		var got []int
@@ -875,7 +905,36 @@ func TestListOffline(t *testing.T) {
 			err := st.List(t.Context(), testColl, &got, nil)
 
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "cursor all")
+			assert.Contains(t, err.Error(), "cursor iteration")
+		})
+	})
+
+	t.Run("cursor error mid-stream", func(t *testing.T) {
+		st, dep := newMockedStorage(t)
+
+		dep.addResponses(
+			mockCreateCursorResponse(
+				7,
+				mockFirstBatch,
+				listDoc("id-1", "a"),
+				listDoc("id-2", "b"),
+			),
+			mockCreateCommandErrorResponse(mockCommandError{
+				Code:    43,
+				Name:    "CursorNotFound",
+				Message: "getMore failed",
+			}),
+		)
+
+		var got []testDoc
+
+		requireCounterIncremented(t, st.GetCounterListedFailed(), func() {
+			err := st.List(t.Context(), testColl, &got, nil)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cursor iteration")
+			assert.Contains(t, err.Error(), "getMore failed")
+			assert.Nil(t, got, "partial cursor results must not be returned")
 		})
 	})
 
