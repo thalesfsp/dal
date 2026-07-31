@@ -310,7 +310,7 @@ func TestFile_Retrieve_DecodeFailure(t *testing.T) {
 func TestFile_List_OptionError(t *testing.T) {
 	str := newTestStorage(t)
 
-	var keys ResponseListKeys
+	var keys ResponseList[map[string]any]
 
 	err := str.List(t.Context(), t.TempDir(), &keys, &list.List{Search: "*"}, storage.WithPreHook[*list.List](nil))
 	require.Error(t, err)
@@ -319,7 +319,7 @@ func TestFile_List_OptionError(t *testing.T) {
 func TestFile_List_PreHookError(t *testing.T) {
 	str := newTestStorage(t)
 
-	var keys ResponseListKeys
+	var keys ResponseList[map[string]any]
 
 	err := str.List(t.Context(), t.TempDir(), &keys, &list.List{Search: "*"},
 		storage.WithPreHook(func(_ context.Context, _ storage.IStorage, _, _ string, _ any, _ *list.List) error {
@@ -334,9 +334,9 @@ func TestFile_List_PostHookErrorAndSuccess(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.json"), []byte(`{}`), 0o600))
 
-	var keys ResponseListKeys
+	var docs ResponseList[map[string]any]
 
-	err := str.List(t.Context(), dir, &keys, &list.List{Search: "*"},
+	err := str.List(t.Context(), dir, &docs, &list.List{Search: "*"},
 		storage.WithPostHook(func(_ context.Context, _ storage.IStorage, _, _ string, _ any, _ *list.List) error {
 			return errBranchPost
 		}))
@@ -344,7 +344,7 @@ func TestFile_List_PostHookErrorAndSuccess(t *testing.T) {
 
 	var called bool
 
-	err = str.List(t.Context(), dir, &keys, &list.List{Search: "*"},
+	err = str.List(t.Context(), dir, &docs, &list.List{Search: "*"},
 		storage.WithPostHook(func(_ context.Context, _ storage.IStorage, _, _ string, _ any, _ *list.List) error {
 			called = true
 
@@ -352,13 +352,13 @@ func TestFile_List_PostHookErrorAndSuccess(t *testing.T) {
 		}))
 	require.NoError(t, err)
 	assert.True(t, called)
-	assert.Len(t, keys.Keys, 1)
+	assert.Len(t, docs.Items, 1)
 }
 
 func TestFile_List_TargetResolutionFailure(t *testing.T) {
 	str := newTestStorage(t)
 
-	var keys ResponseListKeys
+	var keys ResponseList[map[string]any]
 
 	err := str.List(t.Context(), "", &keys, &list.List{Search: "*"})
 	require.Error(t, err)
@@ -370,7 +370,7 @@ func TestFile_List_MissingDirectory(t *testing.T) {
 
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 
-	var keys ResponseListKeys
+	var keys ResponseList[map[string]any]
 
 	err := str.List(t.Context(), missing, &keys, &list.List{Search: "*"})
 	require.Error(t, err)
@@ -380,7 +380,7 @@ func TestFile_List_MissingDirectory(t *testing.T) {
 func TestFile_List_BadGlobPattern(t *testing.T) {
 	str := newTestStorage(t)
 
-	var keys ResponseListKeys
+	var keys ResponseList[map[string]any]
 
 	err := str.List(t.Context(), t.TempDir(), &keys, &list.List{Search: "["})
 	require.Error(t, err)
@@ -393,7 +393,7 @@ func TestFile_List_ParseToStructFailure(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.json"), []byte(`{}`), 0o600))
 
-	err := str.List(t.Context(), dir, ResponseListKeys{}, &list.List{Search: "*"})
+	err := str.List(t.Context(), dir, ResponseList[map[string]any]{}, &list.List{Search: "*"})
 	require.Error(t, err)
 }
 

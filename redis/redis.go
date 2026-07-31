@@ -458,10 +458,21 @@ func (r *Redis) List(ctx context.Context, target string, v any, prm *list.List, 
 
 	iter := r.Client.Scan(ctx, 0, finalParam.Search, 0).Iterator()
 
-	keys := ResponseListKeys{[]string{}}
+	var docs [][]byte
 
 	for iter.Next(ctx) {
-		keys.Keys = append(keys.Keys, iter.Val())
+		doc, err := r.Client.Get(ctx, iter.Val()).Bytes()
+		if err != nil {
+			return customapm.TraceError(
+				ctx,
+				customerror.NewFailedToError(storage.OperationList.String(),
+					customerror.WithError(err),
+				),
+				r.GetLogger(), r.GetCounterListedFailed(),
+			)
+		}
+
+		docs = append(docs, doc)
 	}
 
 	if err := iter.Err(); err != nil {
@@ -474,7 +485,12 @@ func (r *Redis) List(ctx context.Context, target string, v any, prm *list.List, 
 		)
 	}
 
-	if err := storage.ParseToStruct(keys, v); err != nil {
+	docs, err = shared.ApplyListParams(docs, prm)
+	if err != nil {
+		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterListedFailed())
+	}
+
+	if err := shared.Unmarshal(shared.AssembleItems(docs), v); err != nil {
 		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterListedFailed())
 	}
 

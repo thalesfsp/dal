@@ -1,11 +1,11 @@
 package bolt
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"path"
-	"strings"
 	"sync"
 
 	"github.com/thalesfsp/customerror"
@@ -110,16 +110,11 @@ func bucketMatches(pattern string, key []byte) (bool, error) {
 	return matched, nil
 }
 
-// collectBucketItems walks `b` in key order (bbolt's cursor order), writing
-// the JSON value of every key matching `pattern` into `items` as a
-// comma-separated list, stopping once `limit` matches have been collected
-// (limit <= 0 means unlimited). Pulled out of List to keep that method's
-// branching within the repo's cognitive-complexity budget.
-func collectBucketItems(b *bbolt.Bucket, pattern string, limit int, items *strings.Builder) error {
+// collectBucketItems walks `b` in key order (bbolt's cursor order), collecting
+// the JSON value of every key matching `pattern`. Values are cloned because
+// bbolt's byte slices are only valid for the lifetime of the transaction.
+func collectBucketItems(b *bbolt.Bucket, pattern string, docs *[][]byte) error {
 	c := b.Cursor()
-
-	n := 0
-	first := true
 
 	for k, val := c.First(); k != nil; k, val = c.Next() {
 		matched, err := bucketMatches(pattern, k)
@@ -131,18 +126,7 @@ func collectBucketItems(b *bbolt.Bucket, pattern string, limit int, items *strin
 			continue
 		}
 
-		if !first {
-			items.WriteByte(',')
-		}
-
-		items.Write(val)
-
-		first = false
-		n++
-
-		if limit > 0 && n >= limit {
-			break
-		}
+		*docs = append(*docs, bytes.Clone(val))
 	}
 
 	return nil
@@ -529,10 +513,7 @@ func (s *Bolt) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 
 // List data.
 //
-// NOTE: It uses params.List.Search (glob) to filter keys, and honors
-// params.List.Limit (when > 0) to cap how many matches are returned. Results
-// are ordered by key, since that's the order bbolt's cursor walks a bucket
-// in.
+// NOTE: It uses params.List.Search (glob) to filter keys.
 func (s *Bolt) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.
@@ -600,13 +581,7 @@ func (s *Bolt) List(ctx context.Context, target string, v any, prm *list.List, o
 		pattern = "*"
 	}
 
-	limit := finalParam.Limit
-
-	// Build the JSON document with a Builder: naive string concatenation is
-	// O(n²) as every append re-copies the accumulated payload.
-	var items strings.Builder
-
-	items.WriteString(`{"items":[`)
+	var docs [][]byte
 
 	// Same rationale as Count: a missing bucket must surface as an error
 	// instead of an empty-but-plausible listing.
@@ -616,7 +591,7 @@ func (s *Bolt) List(ctx context.Context, target string, v any, prm *list.List, o
 			return bbolterrors.ErrBucketNotFound
 		}
 
-		return collectBucketItems(b, pattern, limit, &items)
+		return collectBucketItems(b, pattern, &docs)
 	}); viewErr != nil {
 		// A malformed Search pattern is already a properly typed
 		// customerror courtesy of bucketMatches — propagate it as-is rather
@@ -633,9 +608,12 @@ func (s *Bolt) List(ctx context.Context, target string, v any, prm *list.List, o
 		return customapm.TraceError(ctx, viewErr, s.GetLogger(), s.GetCounterListedFailed())
 	}
 
-	items.WriteString(`]}`)
+	docs, err = shared.ApplyListParams(docs, prm)
+	if err != nil {
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
+	}
 
-	if err := shared.Unmarshal([]byte(items.String()), v); err != nil {
+	if err := shared.Unmarshal(shared.AssembleItems(docs), v); err != nil {
 		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
 	}
 

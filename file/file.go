@@ -473,8 +473,6 @@ func (s *File) List(ctx context.Context, target string, v any, prm *list.List, o
 		}
 	}
 
-	keys := ResponseListKeys{[]string{}}
-
 	// Same rationale as Count: a missing directory must surface as an error
 	// instead of an empty-but-plausible listing.
 	if _, err := os.Stat(trgt); err != nil {
@@ -494,9 +492,26 @@ func (s *File) List(ctx context.Context, target string, v any, prm *list.List, o
 		), s.GetLogger(), s.GetCounterListedFailed())
 	}
 
-	keys.Keys = matches
+	docs := make([][]byte, 0, len(matches))
 
-	if err := storage.ParseToStruct(keys, v); err != nil {
+	for _, match := range matches {
+		doc, err := os.ReadFile(filepath.Join(trgt, match))
+		if err != nil {
+			return customapm.TraceError(ctx, customerror.NewFailedToError(
+				storage.OperationList.String(),
+				customerror.WithError(err),
+			), s.GetLogger(), s.GetCounterListedFailed())
+		}
+
+		docs = append(docs, doc)
+	}
+
+	docs, err = shared.ApplyListParams(docs, prm)
+	if err != nil {
+		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
+	}
+
+	if err := shared.Unmarshal(shared.AssembleItems(docs), v); err != nil {
 		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
 	}
 
