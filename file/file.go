@@ -58,6 +58,12 @@ type File struct {
 // Implements the IStorage interface.
 //////
 
+// Close releases the resources held by the storage. File opens and closes
+// descriptors per operation, so Close is a no-op.
+func (s *File) Close() error {
+	return nil
+}
+
 // Count returns the number of items in the storage.
 func (s *File) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
 	//////

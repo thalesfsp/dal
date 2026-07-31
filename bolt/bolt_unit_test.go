@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -337,18 +338,60 @@ func TestBolt_New_OpenFailure(t *testing.T) {
 	require.Error(t, err)
 }
 
-// Close releases the file lock; bbolt's own Close is idempotent, and a
-// second call must stay safe (no panic, no error) rather than surface a
-// spurious failure.
 func TestBolt_Close(t *testing.T) {
-	str := newTestStorage(t)
+	t.Run("releases file lock", func(t *testing.T) {
+		str := newTestStorage(t)
+		dbPath := str.Config.Path
 
-	require.NoError(t, str.Close())
-	assert.NoError(t, str.Close())
+		require.NoError(t, str.Close())
 
-	// Close on a Bolt without a Client is a no-op, not a nil dereference.
-	var empty Bolt
-	assert.NoError(t, empty.Close())
+		reopened, err := New(t.Context(), dbPath, &bbolt.Options{Timeout: 100 * time.Millisecond})
+		if err != nil {
+			t.Fatalf("reopening database after Close failed: %v", err)
+		}
+
+		t.Cleanup(func() { _ = reopened.Close() })
+	})
+
+	t.Run("idempotent", func(t *testing.T) {
+		str := newTestStorage(t)
+
+		require.NoError(t, str.Close())
+		assert.NoError(t, str.Close())
+
+		// Close on a Bolt without a Client is a no-op, not a nil dereference.
+		var empty Bolt
+		assert.NoError(t, empty.Close())
+	})
+
+	t.Run("concurrent", func(t *testing.T) {
+		str := newTestStorage(t)
+
+		const goroutines = 8
+
+		start := make(chan struct{})
+		errs := make(chan error, goroutines)
+
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+
+		for range goroutines {
+			go func() {
+				defer wg.Done()
+				<-start
+
+				errs <- str.Close()
+			}()
+		}
+
+		close(start)
+		wg.Wait()
+		close(errs)
+
+		for err := range errs {
+			require.NoError(t, err)
+		}
+	})
 }
 
 //////

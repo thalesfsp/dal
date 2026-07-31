@@ -1096,6 +1096,12 @@ func (es *ElasticSearch) GetClient() any {
 	return es.Client
 }
 
+// Close releases the resources held by the storage.
+func (es *ElasticSearch) Close() error {
+	// TODO(v3): real implementation lands in C1b/C1c.
+	return nil
+}
+
 //////
 // Factory.
 //////

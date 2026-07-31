@@ -40,9 +40,14 @@ import (
 // access, the DAL is generally wider and more abstract because it deals with
 // multiple data sources, while the DAO is more specific and deals with a
 // particular data source.
-//
-//nolint:dupl
 type IStorage interface {
+	// Close releases the resources held by the storage.
+	//
+	// Close must be idempotent: a second call returns nil, so a deferred Close
+	// alongside an explicit one is not a bug. In-process adapters that hold no
+	// releasable resource implement Close as a no-op so the surface is uniform.
+	Close() error
+
 	// Count data.
 	Count(ctx context.Context, target string, prm *count.Count, options ...Func[*count.Count]) (int64, error)
 

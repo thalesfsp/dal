@@ -872,6 +872,12 @@ func (p *SQLite) GetClient() any {
 	return p.Client
 }
 
+// Close releases the resources held by the storage.
+func (p *SQLite) Close() error {
+	// TODO(v3): real implementation lands in C1b/C1c.
+	return nil
+}
+
 //////
 // Factory.
 //////

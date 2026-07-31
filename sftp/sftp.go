@@ -55,6 +55,8 @@ type (
 type SFTP struct {
 	*storage.Storage
 
+	closeOnce sync.Once
+
 	Client *sftp.Client `json:"-" validate:"required,structonly"`
 
 	// Conn is the underlying SSH transport carrying the SFTP subsystem.
@@ -938,25 +940,29 @@ func New(ctx context.Context, addr string, cfg *Config, options ...Option) (*SFT
 // Closing only the client would leave the TCP+SSH session open for the
 // lifetime of the process.
 func (s *SFTP) Close() error {
-	var errs []error
+	var closeErr error
 
-	if s.Client != nil {
-		if err := s.Client.Close(); err != nil {
-			errs = append(errs, err)
+	s.closeOnce.Do(func() {
+		var errs []error
+
+		if s.Client != nil {
+			if err := s.Client.Close(); err != nil {
+				errs = append(errs, err)
+			}
 		}
-	}
 
-	if s.Conn != nil {
-		if err := s.Conn.Close(); err != nil {
-			errs = append(errs, err)
+		if s.Conn != nil {
+			if err := s.Conn.Close(); err != nil {
+				errs = append(errs, err)
+			}
 		}
-	}
 
-	if len(errs) > 0 {
-		return customerror.NewFailedToError("close", customerror.WithError(errors.Join(errs...)))
-	}
+		if len(errs) > 0 {
+			closeErr = customerror.NewFailedToError("close", customerror.WithError(errors.Join(errs...)))
+		}
+	})
 
-	return nil
+	return closeErr
 }
 
 //////

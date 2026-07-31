@@ -31,6 +31,13 @@ func newTestStorage(t *testing.T) *Memory {
 	return str
 }
 
+func TestMemory_Close(t *testing.T) {
+	str := newTestStorage(t)
+
+	require.NoError(t, str.Close())
+	assert.NoError(t, str.Close())
+}
+
 // Happy path: full CRUD round-trip.
 func TestMemory_CRUDRoundTrip(t *testing.T) {
 	ctx := t.Context()

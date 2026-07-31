@@ -58,6 +58,12 @@ type Memory struct {
 // Implements the IStorage interface.
 //////
 
+// Close releases the resources held by the storage. Memory holds no
+// releasable resources, so Close is a no-op.
+func (s *Memory) Close() error {
+	return nil
+}
+
 // keyMatches reports whether the stored key matches the glob pattern. Keys
 // that aren't strings never match. A malformed pattern returns an error.
 func keyMatches(pattern string, key any) (bool, error) {

@@ -69,6 +69,8 @@ type Config struct {
 type Bolt struct {
 	*storage.Storage
 
+	closeOnce sync.Once
+
 	// Client is the live bbolt handle. It's tagged `structonly` so
 	// validation confirms it's non-nil without descending into it: bbolt
 	// runs a background freelist/mmap and its own internal locking, and
@@ -1010,15 +1012,19 @@ func New(ctx context.Context, path string, opts *bbolt.Options) (*Bolt, error) {
 // doesn't get cleaned up by the OS closing an fd on process exit if the
 // process itself keeps running.
 func (s *Bolt) Close() error {
-	if s.Client == nil {
-		return nil
-	}
+	var closeErr error
 
-	if err := s.Client.Close(); err != nil {
-		return customerror.NewFailedToError("close", customerror.WithError(err))
-	}
+	s.closeOnce.Do(func() {
+		if s.Client == nil {
+			return
+		}
 
-	return nil
+		if err := s.Client.Close(); err != nil {
+			closeErr = customerror.NewFailedToError("close", customerror.WithError(err))
+		}
+	})
+
+	return closeErr
 }
 
 //////

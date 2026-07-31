@@ -727,6 +727,12 @@ func (r *Redis) GetClient() any {
 	return r.Client
 }
 
+// Close releases the resources held by the storage.
+func (r *Redis) Close() error {
+	// TODO(v3): real implementation lands in C1b/C1c.
+	return nil
+}
+
 //////
 // Factory.
 //////

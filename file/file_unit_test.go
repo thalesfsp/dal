@@ -33,6 +33,13 @@ func newTestStorage(t *testing.T) *File {
 	return str
 }
 
+func TestFile_Close(t *testing.T) {
+	str := newTestStorage(t)
+
+	require.NoError(t, str.Close())
+	assert.NoError(t, str.Close())
+}
+
 // Happy path: full CRUD round-trip against a temp file.
 func TestFile_CRUDRoundTrip(t *testing.T) {
 	ctx := t.Context()

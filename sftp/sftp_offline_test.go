@@ -252,6 +252,44 @@ func mustCreateFile(t *testing.T, str *SFTP, trgt string, v any) {
 // Tests.
 //////
 
+func TestClose_Offline(t *testing.T) {
+	t.Run("idempotent", func(t *testing.T) {
+		str := newOfflineStorage(t)
+
+		require.NoError(t, str.Close())
+		assert.NoError(t, str.Close())
+	})
+
+	t.Run("concurrent", func(t *testing.T) {
+		str := newOfflineStorage(t)
+
+		const goroutines = 8
+
+		start := make(chan struct{})
+		errs := make(chan error, goroutines)
+
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+
+		for range goroutines {
+			go func() {
+				defer wg.Done()
+				<-start
+
+				errs <- str.Close()
+			}()
+		}
+
+		close(start)
+		wg.Wait()
+		close(errs)
+
+		for err := range errs {
+			require.NoError(t, err)
+		}
+	})
+}
+
 // New must work against a real (in-process) server with both documented addr
 // forms, and must register the singleton.
 func TestNew_Offline_AddrForms(t *testing.T) {

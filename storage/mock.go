@@ -19,8 +19,6 @@ import (
 //////
 
 // Mock is a struct which satisfies the storage.IStorage interface.
-//
-//nolint:dupl
 type Mock struct {
 	//////
 	// Allows to set the returned value of each method.
@@ -96,11 +94,18 @@ type Mock struct {
 	MockGetCounterUpdatedFailed func() *expvar.Int
 }
 
+var _ IStorage = (*Mock)(nil)
+
 //////
 // When the methods are called, it will call the corresponding method in the
 // Mock struct returning the desired value. This implements the IStorage
 // interface.
 //////
+
+// Close releases the resources held by the storage.
+func (m *Mock) Close() error {
+	return nil
+}
 
 // Count data.
 func (m *Mock) Count(ctx context.Context, target string, prm *count.Count, options ...Func[*count.Count]) (int64, error) {
