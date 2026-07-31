@@ -76,9 +76,6 @@ linters:
           - unparam
         path: http/
       - linters:
-          - govet
-        path: mongo*
-      - linters:
           - cyclop
           - testpackage
         path: test.go
