@@ -193,12 +193,7 @@ func (p *Postgres) Count(ctx context.Context, target string, prm *count.Count, o
 		return 0, customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCountedFailed())
 	}
 
-	// Honor a caller-provided Search; only default when none was supplied.
-	// Copy prm so defaulting never mutates the caller-owned params struct.
-	if prm != nil {
-		prmCopy := *prm
-		finalParam = &prmCopy
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	if finalParam.Search == "" {
 		// trgt is interpolated into the statement — reject anything that
@@ -304,9 +299,7 @@ func (p *Postgres) Delete(ctx context.Context, id, target string, prm *delete.De
 		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterDeletedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -423,9 +416,7 @@ func (p *Postgres) Retrieve(ctx context.Context, id, target string, v any, prm *
 		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterRetrievedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -555,12 +546,7 @@ func (p *Postgres) List(ctx context.Context, target string, v any, prm *list.Lis
 		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
 	}
 
-	// Honor a caller-provided Search; only default when none was supplied.
-	// Copy prm so defaulting never mutates the caller-owned params struct.
-	if prm != nil {
-		prmCopy := *prm
-		finalParam = &prmCopy
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	if finalParam.Search == "" {
 		// trgt is interpolated into the statement — reject anything that
@@ -659,9 +645,7 @@ func (p *Postgres) Create(ctx context.Context, id, target string, v any, prm *cr
 		return "", customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCreatedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -784,9 +768,7 @@ func (p *Postgres) Update(ctx context.Context, id, target string, v any, prm *up
 		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterUpdatedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.

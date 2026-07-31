@@ -154,9 +154,7 @@ func (d *DynamoDB) Count(ctx context.Context, target string, prm *count.Count, o
 		return 0, customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCountedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -327,9 +325,7 @@ func (d *DynamoDB) Delete(ctx context.Context, id, target string, prm *delete.De
 		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterDeletedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -453,9 +449,7 @@ func (d *DynamoDB) Retrieve(ctx context.Context, id, target string, v any, prm *
 		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterRetrievedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -552,7 +546,7 @@ func (d *DynamoDB) Retrieve(ctx context.Context, id, target string, v any, prm *
 //
 // NOTE: It uses param.List.Any for DynamoDB filter expressions.
 //
-//nolint:gocognit,cyclop,funlen,gocyclo,maintidx
+//nolint:gocognit,cyclop,funlen,maintidx
 func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.List, opts ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.
@@ -591,9 +585,7 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterListedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -817,9 +809,7 @@ func (d *DynamoDB) Create(ctx context.Context, id, target string, v any, prm *cr
 		return "", customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCreatedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -974,9 +964,7 @@ func (d *DynamoDB) Update(ctx context.Context, id, target string, v any, prm *up
 		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterUpdatedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.

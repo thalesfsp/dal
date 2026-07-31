@@ -202,12 +202,7 @@ func (m *MySQL) Count(ctx context.Context, target string, prm *count.Count, opti
 		return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
 	}
 
-	// Honor a caller-provided Search; only default when none was supplied.
-	// Copy prm so defaulting never mutates the caller-owned params struct.
-	if prm != nil {
-		prmCopy := *prm
-		finalParam = &prmCopy
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	if finalParam.Search == "" {
 		// trgt is interpolated into the statement — reject anything that
@@ -313,9 +308,7 @@ func (m *MySQL) Delete(ctx context.Context, id, target string, prm *delete.Delet
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -432,9 +425,7 @@ func (m *MySQL) Retrieve(ctx context.Context, id, target string, v any, prm *ret
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -564,12 +555,7 @@ func (m *MySQL) List(ctx context.Context, target string, v any, prm *list.List, 
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
 	}
 
-	// Honor a caller-provided Search; only default when none was supplied.
-	// Copy prm so defaulting never mutates the caller-owned params struct.
-	if prm != nil {
-		prmCopy := *prm
-		finalParam = &prmCopy
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	if finalParam.Search == "" {
 		// trgt is interpolated into the statement — reject anything that
@@ -670,9 +656,7 @@ func (m *MySQL) Create(ctx context.Context, id, target string, v any, prm *creat
 		return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -812,9 +796,7 @@ func (m *MySQL) Update(ctx context.Context, id, target string, v any, prm *updat
 		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.

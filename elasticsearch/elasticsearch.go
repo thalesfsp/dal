@@ -276,9 +276,7 @@ func (es *ElasticSearch) Count(ctx context.Context, target string, prm *count.Co
 
 	finalParam.Search = matchAllQuery
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -434,9 +432,7 @@ func (es *ElasticSearch) Delete(ctx context.Context, id, target string, prm *del
 		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterDeletedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -555,9 +551,7 @@ func (es *ElasticSearch) Retrieve(ctx context.Context, id, target string, v any,
 		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterRetrievedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -685,9 +679,7 @@ func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *li
 
 	finalParam.Search = matchAllQuery
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -878,9 +870,7 @@ func (es *ElasticSearch) Create(ctx context.Context, id, target string, v any, p
 		return "", customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCreatedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -1006,9 +996,7 @@ func (es *ElasticSearch) Update(ctx context.Context, id, target string, v any, p
 		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterUpdatedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.

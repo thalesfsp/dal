@@ -111,9 +111,7 @@ func (r *Redis) Count(ctx context.Context, target string, prm *count.Count, opti
 	// Application's default values.
 	finalParam.Search = "*"
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Count.
@@ -227,9 +225,7 @@ func (r *Redis) Delete(ctx context.Context, id, target string, prm *delete.Delet
 	}
 
 	// Application's default values.
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Delete.
@@ -326,9 +322,7 @@ func (r *Redis) Retrieve(ctx context.Context, id, target string, v any, prm *ret
 		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterRetrievedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Retrieve.
@@ -440,9 +434,7 @@ func (r *Redis) List(ctx context.Context, target string, v any, prm *list.List, 
 	// Application's default values.
 	finalParam.Search = "*"
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Query.
@@ -557,9 +549,7 @@ func (r *Redis) Create(ctx context.Context, id, target string, v any, prm *creat
 
 	finalParam.TTL = 0
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Create.
@@ -666,9 +656,7 @@ func (r *Redis) Update(ctx context.Context, id, target string, v any, prm *updat
 
 	finalParam.TTL = 0
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Update.

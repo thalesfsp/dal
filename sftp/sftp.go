@@ -120,9 +120,7 @@ func (s *SFTP) Count(ctx context.Context, target string, prm *count.Count, optio
 	// Application's default values.
 	finalParam.Search = "*"
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Filter.
@@ -260,9 +258,7 @@ func (s *SFTP) Delete(ctx context.Context, id, target string, prm *delete.Delete
 		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -371,9 +367,7 @@ func (s *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -495,9 +489,7 @@ func (s *SFTP) List(ctx context.Context, target string, v any, prm *list.List, o
 	// Application's default values.
 	finalParam.Search = "*"
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -627,9 +619,7 @@ func (s *SFTP) Create(ctx context.Context, id, target string, v any, prm *create
 		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -761,9 +751,7 @@ func (s *SFTP) Update(ctx context.Context, id, target string, v any, prm *update
 		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.

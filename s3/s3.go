@@ -126,9 +126,7 @@ func (s *S3) Count(ctx context.Context, target string, prm *count.Count, options
 	// Application's default values.
 	finalParam.Search = "*"
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Count.
@@ -232,9 +230,7 @@ func (s *S3) Delete(ctx context.Context, id, target string, prm *delete.Delete, 
 	}
 
 	// Application's default values.
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -345,9 +341,7 @@ func (s *S3) Retrieve(ctx context.Context, id, target string, v any, prm *retrie
 		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
 	}
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -487,9 +481,7 @@ func (s *S3) List(ctx context.Context, target string, v any, prm *list.List, opt
 	// Application's default values.
 	finalParam.Search = "*"
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Query.
@@ -599,9 +591,7 @@ func (s *S3) Create(ctx context.Context, id, target string, v any, prm *create.C
 
 	finalParam.TTL = 0
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
@@ -759,9 +749,7 @@ func (s *S3) Update(ctx context.Context, id, target string, v any, prm *update.U
 
 	finalParam.TTL = 0
 
-	if prm != nil {
-		finalParam = prm
-	}
+	finalParam = shared.MergeParams(finalParam, prm)
 
 	//////
 	// Target definition.
