@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 )
 
 //////
@@ -34,6 +34,7 @@ type s3Fake struct {
 
 	// Status overrides. Zero means "use the default successful status".
 	headStatus   int
+	headFailures int
 	putStatus    int
 	deleteStatus int
 	listStatus   int
@@ -208,6 +209,13 @@ func (f *s3Fake) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *s3Fake) handleHeadBucket(w http.ResponseWriter) {
+	if f.headFailures > 0 {
+		f.headFailures--
+		writeS3XMLError(w, http.StatusInternalServerError, "InternalError", "simulated retryable head failure")
+
+		return
+	}
+
 	if f.headStatus != 0 && f.headStatus != http.StatusOK {
 		w.WriteHeader(f.headStatus)
 
@@ -215,6 +223,20 @@ func (f *s3Fake) handleHeadBucket(w http.ResponseWriter) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func (f *s3Fake) requestCount(method string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	count := 0
+	for _, request := range f.requests {
+		if strings.HasPrefix(request, method+" ") {
+			count++
+		}
+	}
+
+	return count
 }
 
 func (f *s3Fake) handlePutObject(w http.ResponseWriter, r *http.Request, key string) {
@@ -356,11 +378,9 @@ func s3ListObjectsV2XML(keys []string, truncated bool, nextToken string) string 
 // doesn't actually hit the network, e.g. a *localTransport.
 func s3TestConfig(endpoint string, client *http.Client) *Config {
 	return &aws.Config{
-		Endpoint:         aws.String(endpoint),
-		Region:           aws.String("us-east-1"),
-		Credentials:      credentials.NewStaticCredentials("k", "s", ""),
-		S3ForcePathStyle: aws.Bool(true),
-		DisableSSL:       aws.Bool(true),
-		HTTPClient:       client,
+		BaseEndpoint: aws.String(endpoint),
+		Region:       "us-east-1",
+		Credentials:  credentials.NewStaticCredentialsProvider("k", "s", ""),
+		HTTPClient:   client,
 	}
 }

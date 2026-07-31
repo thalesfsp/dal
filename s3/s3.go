@@ -10,11 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v3/internal/customapm"
@@ -57,7 +58,7 @@ type S3 struct {
 	Bucket string `json:"bucket" validate:"required,gt=0"`
 
 	// Client is the S3 client.
-	Client *s3.S3 `json:"-" validate:"required,structonly"`
+	Client *awss3.Client `json:"-" validate:"required,structonly"`
 
 	closeOnce sync.Once
 
@@ -77,9 +78,8 @@ type S3 struct {
 	// for example: log-{YYYY}-{MM}. For S3, it isn't used at all.
 	Target string `json:"-" validate:"omitempty,gt=0"`
 
-	// S3 manager is an specialized uploader for S3 which supports multipart
-	// uploads.
-	uploader *s3manager.Uploader
+	// S3 transfer manager supports multipart uploads.
+	uploader *transfermanager.Client
 }
 
 //////
@@ -140,21 +140,23 @@ func (s *S3) Count(ctx context.Context, target string, prm *count.Count, options
 		}
 	}
 
-	input := &s3.ListObjectsV2Input{
+	input := &awss3.ListObjectsV2Input{
 		Bucket: aws.String(s.Bucket),
 	}
 
 	var fileCount int
 
-	if err := s.Client.ListObjectsV2PagesWithContext(ctx, input, func(page *s3.ListObjectsV2Output, lastPage bool) bool {
-		fileCount += len(page.Contents)
+	paginator := awss3.NewListObjectsV2Paginator(s.Client, input)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return 0, customapm.TraceError(ctx, customerror.NewFailedToError(
+				storage.OperationCount.String(),
+				customerror.WithError(err),
+			), s.GetLogger(), s.GetCounterCountedFailed())
+		}
 
-		return true
-	}); err != nil {
-		return 0, customapm.TraceError(ctx, customerror.NewFailedToError(
-			storage.OperationCount.String(),
-			customerror.WithError(err),
-		), s.GetLogger(), s.GetCounterCountedFailed())
+		fileCount += len(page.Contents)
 	}
 
 	if o.PostHookFunc != nil {
@@ -253,12 +255,12 @@ func (s *S3) Delete(ctx context.Context, id, target string, prm *delete.Delete, 
 		}
 	}
 
-	input := &s3.DeleteObjectInput{
+	input := &awss3.DeleteObjectInput{
 		Bucket: aws.String(s.Bucket),
 		Key:    aws.String(trgt),
 	}
 
-	if _, err := s.Client.DeleteObjectWithContext(ctx, input); err != nil {
+	if _, err := s.Client.DeleteObject(ctx, input); err != nil {
 		return customapm.TraceError(
 			ctx,
 			customerror.NewFailedToError(
@@ -364,16 +366,18 @@ func (s *S3) Retrieve(ctx context.Context, id, target string, v any, prm *retrie
 		}
 	}
 
-	input := &s3.GetObjectInput{
+	input := &awss3.GetObjectInput{
 		Bucket: aws.String(s.Bucket),
 		Key:    aws.String(trgt),
 	}
 
-	output, err := s.Client.GetObjectWithContext(ctx, input)
+	output, err := s.Client.GetObject(ctx, input)
 	if err != nil {
-		var awsErr awserr.Error
-		if errors.As(err, &awsErr) &&
-			(awsErr.Code() == s3.ErrCodeNoSuchKey || awsErr.Code() == "NotFound") {
+		var noSuchKey *types.NoSuchKey
+		var responseError *smithyhttp.ResponseError
+
+		if errors.As(err, &noSuchKey) ||
+			(errors.As(err, &responseError) && responseError.HTTPStatusCode() == http.StatusNotFound) {
 			return customapm.TraceError(
 				ctx,
 				customerror.NewHTTPError(http.StatusNotFound),
@@ -495,26 +499,28 @@ func (s *S3) List(ctx context.Context, target string, v any, prm *list.List, opt
 		}
 	}
 
-	input := &s3.ListObjectsV2Input{
+	input := &awss3.ListObjectsV2Input{
 		Bucket: aws.String(s.Bucket),
 	}
 
 	keys := ResponseListKeys{[]string{}}
 
-	if err := s.Client.ListObjectsV2PagesWithContext(ctx, input, func(page *s3.ListObjectsV2Output, lastPage bool) bool {
+	paginator := awss3.NewListObjectsV2Paginator(s.Client, input)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return customapm.TraceError(
+				ctx,
+				customerror.NewFailedToError(storage.OperationList.String(),
+					customerror.WithError(err),
+				),
+				s.GetLogger(), s.GetCounterListedFailed(),
+			)
+		}
+
 		for _, object := range page.Contents {
 			keys.Keys = append(keys.Keys, *object.Key)
 		}
-
-		return true
-	}); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationList.String(),
-				customerror.WithError(err),
-			),
-			s.GetLogger(), s.GetCounterListedFailed(),
-		)
 	}
 
 	if err := storage.ParseToStruct(keys, v); err != nil {
@@ -615,7 +621,7 @@ func (s *S3) Create(ctx context.Context, id, target string, v any, prm *create.C
 	}
 
 	// Prepare the input for the S3 upload request.
-	uploadInput := &s3manager.UploadInput{
+	uploadInput := &transfermanager.UploadObjectInput{
 		Bucket: aws.String(s.Bucket),
 		Key:    aws.String(trgt),
 	}
@@ -659,7 +665,7 @@ func (s *S3) Create(ctx context.Context, id, target string, v any, prm *create.C
 	}
 
 	// Perform the S3 upload request.
-	uO, err := s.uploader.UploadWithContext(ctx, uploadInput)
+	uO, err := s.uploader.UploadObject(ctx, uploadInput)
 	if err != nil {
 		// If an error occurred, log it and return.
 		return "", customapm.TraceError(
@@ -696,7 +702,7 @@ func (s *S3) Create(ctx context.Context, id, target string, v any, prm *create.C
 
 	s.GetCounterCreated().Add(1)
 
-	return uO.Location, nil
+	return aws.ToString(uO.Location), nil
 }
 
 // Update data.
@@ -773,7 +779,7 @@ func (s *S3) Update(ctx context.Context, id, target string, v any, prm *update.U
 	}
 
 	// Prepare the input for the S3 upload request.
-	uploadInput := &s3manager.UploadInput{
+	uploadInput := &transfermanager.UploadObjectInput{
 		Bucket: aws.String(s.Bucket),
 		Key:    aws.String(trgt),
 	}
@@ -812,7 +818,7 @@ func (s *S3) Update(ctx context.Context, id, target string, v any, prm *update.U
 	}
 
 	// Perform the S3 upload request.
-	if _, err := s.uploader.UploadWithContext(ctx, uploadInput); err != nil {
+	if _, err := s.uploader.UploadObject(ctx, uploadInput); err != nil {
 		// If an error occurred, log it and return.
 		return customapm.TraceError(
 			ctx,
@@ -859,10 +865,18 @@ func (s *S3) GetClient() any {
 // Close releases the resources held by the storage.
 func (s *S3) Close() error {
 	s.closeOnce.Do(func() {
-		// aws-sdk-go v1 sessions have no Close method. Their only retained
-		// network resource is the HTTP client's idle keep-alive pool.
-		if s.Client.Config.HTTPClient != nil {
-			s.Client.Config.HTTPClient.CloseIdleConnections()
+		// An aws-sdk-go-v2 client holds no closable handle; its only retained
+		// network resource is the HTTP client's idle keep-alive pool. The SDK's
+		// aws.HTTPClient interface is just Do(*http.Request), so
+		// CloseIdleConnections has to be probed for rather than called
+		// directly — *http.Client and *http.Transport both provide it, and a
+		// caller-supplied client that does not is simply left alone.
+		if s.Config == nil {
+			return
+		}
+
+		if closer, ok := s.Config.HTTPClient.(interface{ CloseIdleConnections() }); ok {
+			closer.CloseIdleConnections()
 		}
 	})
 
@@ -891,20 +905,27 @@ func New(ctx context.Context, bucket string, cfg *Config) (*S3, error) {
 	// Client.
 	//////
 
-	sess, err := session.NewSession(cfg)
-	if err != nil {
-		return nil, customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
-				"create AWS session",
-				customerror.WithError(err),
-			),
-			s.GetLogger(),
-			nil,
-		)
+	var finalConfig Config
+	if cfg == nil {
+		finalConfig, err = awsconfig.LoadDefaultConfig(ctx)
+		if err != nil {
+			return nil, customapm.TraceError(
+				ctx,
+				customerror.NewFailedToError(
+					"load AWS configuration",
+					customerror.WithError(err),
+				),
+				s.GetLogger(),
+				nil,
+			)
+		}
+	} else {
+		finalConfig = *cfg
 	}
 
-	client := s3.New(sess)
+	client := awss3.NewFromConfig(finalConfig, func(options *awss3.Options) {
+		options.UsePathStyle = finalConfig.BaseEndpoint != nil
+	})
 
 	//////
 	// Ping.
@@ -913,11 +934,11 @@ func New(ctx context.Context, bucket string, cfg *Config) (*S3, error) {
 	r := retrier.New(retrier.ExponentialBackoff(3, 10*time.Second), nil)
 
 	if err := r.RunCtx(ctx, func(ctx context.Context) error {
-		input := &s3.HeadBucketInput{
+		input := &awss3.HeadBucketInput{
 			Bucket: aws.String(bucket),
 		}
 
-		if _, err := client.HeadBucketWithContext(ctx, input); err != nil {
+		if _, err := client.HeadBucket(ctx, input); err != nil {
 			cE := customerror.NewFailedToError(
 				"ping",
 				customerror.WithError(err),
@@ -943,9 +964,9 @@ func New(ctx context.Context, bucket string, cfg *Config) (*S3, error) {
 
 		Bucket: bucket,
 		Client: client,
-		Config: cfg,
+		Config: &finalConfig,
 
-		uploader: s3manager.NewUploader(sess),
+		uploader: transfermanager.New(client),
 	}
 
 	if err := validation.Validate(storage); err != nil {
@@ -995,7 +1016,7 @@ func Set(s storage.IStorage) {
 //
 // Parameters:
 // - ctx: The context in which the function is called. This is used for error tracing.
-// - s: The S3 storage interface. This must have an underlying type of *s3.S3.
+// - s: The S3 storage interface. This must return an AWS SDK v2 *s3.Client.
 // - bucket: The name of the S3 bucket containing the object.
 // - key: The key (path) of the object in the S3 bucket.
 // - expire: The duration for which the pre-signed URL is valid.
@@ -1009,8 +1030,8 @@ func RetrieveSigned(
 	target, bucket string,
 	expire time.Duration,
 ) (string, error) {
-	// Assert that the underlying type of s.GetClient() is *s3.S3.
-	client, ok := s.GetClient().(*s3.S3)
+	// Assert that the underlying type of s.GetClient() is *s3.Client.
+	client, ok := s.GetClient().(*awss3.Client)
 	if !ok {
 		// If the assertion failed, return an error.
 		//
@@ -1027,16 +1048,17 @@ func RetrieveSigned(
 	}
 
 	// Prepare the input for the S3 GetObject request.
-	input := &s3.GetObjectInput{
+	input := &awss3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(target),
 	}
 
-	// Generate the GetObject request.
-	req, _ := client.GetObjectRequest(input)
-
 	// Generate the pre-signed URL.
-	url, err := req.Presign(expire)
+	output, err := awss3.NewPresignClient(client).PresignGetObject(
+		ctx,
+		input,
+		awss3.WithPresignExpires(expire),
+	)
 	if err != nil {
 		// If an error occurred, trace it and return.
 		return "", customapm.TraceError(
@@ -1051,5 +1073,5 @@ func RetrieveSigned(
 	}
 
 	// Return the pre-signed URL and no error.
-	return url, nil
+	return output.URL, nil
 }

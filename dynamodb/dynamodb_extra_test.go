@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thalesfsp/dal/v3/storage"
@@ -24,12 +27,8 @@ import (
 	"github.com/thalesfsp/params/v2/update"
 )
 
-// TestMain clears AWS_CA_BUNDLE once for the whole binary. The sandbox's
-// outbound-proxy setup exports it; session.New picks it up regardless of
-// what's in our *aws.Config and then requires HTTPClient.Transport to be a
-// concrete *http.Transport to install it, which dynamoLocalTransport (by
-// design: it never dials out) is not. Nothing in this package's tests makes
-// a real TLS connection, so the custom bundle is moot.
+// TestMain clears AWS_CA_BUNDLE once for the whole binary. Nothing in this
+// package's tests makes a real TLS connection, so the custom bundle is moot.
 func TestMain(m *testing.M) {
 	os.Unsetenv("AWS_CA_BUNDLE")
 	os.Exit(m.Run())
@@ -46,9 +45,21 @@ type dynamoDoc struct {
 	Version string `dynamodbav:"version"`
 }
 
+type capturedScanInput struct {
+	Select                    types.Select               `json:"Select"`
+	ProjectionExpression      *string                    `json:"ProjectionExpression"`
+	FilterExpression          *string                    `json:"FilterExpression"`
+	Limit                     *int32                     `json:"Limit"`
+	ExpressionAttributeNames  map[string]string          `json:"ExpressionAttributeNames"`
+	ExpressionAttributeValues map[string]json.RawMessage `json:"ExpressionAttributeValues"`
+}
+
 // errHook is returned by the failing branch of hookRecorder.
 var errHook = errors.New("hook failure")
 
+// closeTrackingTransport records CloseIdleConnections so a Close test can
+// assert the transport was genuinely released, not merely that Close returned
+// nil.
 type closeTrackingTransport struct {
 	next http.RoundTripper
 
@@ -72,6 +83,19 @@ func (t *closeTrackingTransport) CloseCalls() int {
 	defer t.mu.Unlock()
 
 	return t.closeCalls
+}
+
+var errCredentials = errors.New("credential retrieval failed")
+
+// failingCredentialsProvider drives the aws-sdk-go-v2 credential-failure path.
+type failingCredentialsProvider struct {
+	called *atomic.Bool
+}
+
+func (p failingCredentialsProvider) Retrieve(context.Context) (aws.Credentials, error) {
+	p.called.Store(true)
+
+	return aws.Credentials{}, errCredentials
 }
 
 // hookRecorder returns a storage.HookFunc that records it was called (via
@@ -264,6 +288,31 @@ func TestNew_PingFailure(t *testing.T) {
 	assert.Nil(t, str)
 }
 
+func TestNew_CredentialFailure(t *testing.T) {
+	fake := newDynamoFake()
+	cfg := dynamoTestConfig(fake.client())
+
+	var called atomic.Bool
+	cfg.Credentials = failingCredentialsProvider{called: &called}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	str, err := New(ctx, "us-east-1", cfg)
+	require.Error(t, err)
+	assert.Nil(t, str)
+	assert.True(t, called.Load(), "the configured credential provider was not called")
+}
+
+func TestNew_RetriesThrottling(t *testing.T) {
+	fake := newDynamoFake()
+	fake.listTablesFailures = 1
+
+	str := newTestDynamo(t, fake)
+	require.NotNil(t, str)
+	assert.GreaterOrEqual(t, fake.requestCount("ListTables"), 2)
+}
+
 func TestNewWithTable_And_NewWithDynamicTable(t *testing.T) {
 	fake := newDynamoFake()
 
@@ -317,6 +366,17 @@ func TestDynamoDB_GetClient(t *testing.T) {
 	str, _ := sharedTestDynamo(t)
 
 	assert.Same(t, str.Client, str.GetClient())
+}
+
+func TestDynamoDB_ContextCancellation(t *testing.T) {
+	str, _ := sharedTestDynamo(t)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := str.Count(ctx, "table-canceled", &count.Count{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 //////
@@ -474,7 +534,7 @@ func TestDynamoDB_Create(t *testing.T) {
 	t.Run("marshal-error", func(t *testing.T) {
 		before := str.GetCounterCreatedFailed().Value()
 
-		// A map with an empty-string key is what dynamodbattribute rejects
+		// A map with an empty-string key is what attributevalue rejects
 		// ("map key cannot be empty") - most Go values marshal into
 		// *something*, so this is the reliable way to hit MarshalMap's
 		// error branch.
@@ -548,9 +608,9 @@ func TestDynamoDB_Update(t *testing.T) {
 
 	const table = "table-update"
 
-	fake.putItem(table, map[string]*dynamodb.AttributeValue{
-		"id":   {S: aws.String("u1")},
-		"name": {S: aws.String("old")},
+	fake.putItem(table, map[string]types.AttributeValue{
+		"id":   stringAttribute("u1"),
+		"name": stringAttribute("old"),
 	})
 
 	t.Run("empty-id", func(t *testing.T) {
@@ -702,7 +762,7 @@ func TestDynamoDB_Delete(t *testing.T) {
 	})
 
 	t.Run("happy-path-with-hooks", func(t *testing.T) {
-		fake.putItem(table, map[string]*dynamodb.AttributeValue{"id": {S: aws.String("d1")}})
+		fake.putItem(table, map[string]types.AttributeValue{"id": stringAttribute("d1")})
 
 		var preCalled, postCalled bool
 
@@ -729,9 +789,9 @@ func TestDynamoDB_Retrieve(t *testing.T) {
 
 	const table = "table-retrieve"
 
-	fake.putItem(table, map[string]*dynamodb.AttributeValue{
-		"id":   {S: aws.String("r1")},
-		"name": {S: aws.String("alpha")},
+	fake.putItem(table, map[string]types.AttributeValue{
+		"id":   stringAttribute("r1"),
+		"name": stringAttribute("alpha"),
 	})
 
 	t.Run("empty-id", func(t *testing.T) {
@@ -841,8 +901,8 @@ func TestDynamoDB_Count(t *testing.T) {
 
 	const table = "table-count"
 
-	fake.putItem(table, map[string]*dynamodb.AttributeValue{"id": {S: aws.String("c1")}, "status": {S: aws.String("active")}})
-	fake.putItem(table, map[string]*dynamodb.AttributeValue{"id": {S: aws.String("c2")}, "status": {S: aws.String("active")}})
+	fake.putItem(table, map[string]types.AttributeValue{"id": stringAttribute("c1"), "status": stringAttribute("active")})
+	fake.putItem(table, map[string]types.AttributeValue{"id": stringAttribute("c2"), "status": stringAttribute("active")})
 
 	t.Run("happy-path-no-filter", func(t *testing.T) {
 		cnt, err := str.Count(t.Context(), table, &count.Count{})
@@ -852,10 +912,10 @@ func TestDynamoDB_Count(t *testing.T) {
 		reqs := fake.scanRequests()
 		require.NotEmpty(t, reqs)
 
-		var sent dynamodb.ScanInput
+		var sent capturedScanInput
 
 		require.NoError(t, json.Unmarshal(reqs[len(reqs)-1].body, &sent))
-		assert.Equal(t, dynamodb.SelectCount, aws.StringValue(sent.Select))
+		assert.Equal(t, types.SelectCount, sent.Select)
 	})
 
 	t.Run("happy-path-with-filter", func(t *testing.T) {
@@ -871,14 +931,14 @@ func TestDynamoDB_Count(t *testing.T) {
 		reqs := fake.scanRequests()
 		require.NotEmpty(t, reqs)
 
-		var sent dynamodb.ScanInput
+		var sent capturedScanInput
 
 		require.NoError(t, json.Unmarshal(reqs[len(reqs)-1].body, &sent))
 		require.Len(t, sent.ExpressionAttributeNames, 1)
 
 		for placeholder, real := range sent.ExpressionAttributeNames {
 			assert.Regexp(t, `^#[A-Za-z0-9_]+$`, placeholder)
-			assert.Equal(t, "created-at", aws.StringValue(real))
+			assert.Equal(t, "created-at", real)
 		}
 	})
 
@@ -940,16 +1000,13 @@ func TestDynamoDB_Count(t *testing.T) {
 	})
 
 	t.Run("pagination", func(t *testing.T) {
-		one := int64(1)
-		two := int64(2)
-
 		restore := fake.setScanQueue([]dynamodb.ScanOutput{
 			{
-				Count:            &two,
-				LastEvaluatedKey: map[string]*dynamodb.AttributeValue{"id": {S: aws.String("c2")}},
+				Count:            2,
+				LastEvaluatedKey: map[string]types.AttributeValue{"id": stringAttribute("c2")},
 			},
 			{
-				Count: &one,
+				Count: 1,
 			},
 		})
 		t.Cleanup(restore)
@@ -975,8 +1032,8 @@ func TestDynamoDB_List(t *testing.T) {
 
 	const table = "table-list"
 
-	fake.putItem(table, map[string]*dynamodb.AttributeValue{
-		"id": {S: aws.String("l1")}, "name": {S: aws.String("alpha")}, "created-at": {S: aws.String("2020-01-01")},
+	fake.putItem(table, map[string]types.AttributeValue{
+		"id": stringAttribute("l1"), "name": stringAttribute("alpha"), "created-at": stringAttribute("2020-01-01"),
 	})
 
 	t.Run("happy-path-returns-items-not-just-count", func(t *testing.T) {
@@ -992,10 +1049,10 @@ func TestDynamoDB_List(t *testing.T) {
 		reqs := fake.scanRequests()
 		require.NotEmpty(t, reqs)
 
-		var sent dynamodb.ScanInput
+		var sent capturedScanInput
 
 		require.NoError(t, json.Unmarshal(reqs[len(reqs)-1].body, &sent))
-		assert.Empty(t, aws.StringValue(sent.Select))
+		assert.Empty(t, sent.Select)
 	})
 
 	t.Run("fields-projection-sanitizes-unsafe-names", func(t *testing.T) {
@@ -1006,7 +1063,7 @@ func TestDynamoDB_List(t *testing.T) {
 		reqs := fake.scanRequests()
 		require.NotEmpty(t, reqs)
 
-		var sent dynamodb.ScanInput
+		var sent capturedScanInput
 
 		require.NoError(t, json.Unmarshal(reqs[len(reqs)-1].body, &sent))
 		require.NotNil(t, sent.ProjectionExpression)
@@ -1014,7 +1071,7 @@ func TestDynamoDB_List(t *testing.T) {
 
 		for placeholder, real := range sent.ExpressionAttributeNames {
 			assert.Regexp(t, `^#[A-Za-z0-9_]+$`, placeholder)
-			assert.Equal(t, "created-at", aws.StringValue(real))
+			assert.Equal(t, "created-at", real)
 		}
 	})
 
@@ -1026,11 +1083,18 @@ func TestDynamoDB_List(t *testing.T) {
 		reqs := fake.scanRequests()
 		require.NotEmpty(t, reqs)
 
-		var sent dynamodb.ScanInput
+		var sent capturedScanInput
 
 		require.NoError(t, json.Unmarshal(reqs[len(reqs)-1].body, &sent))
 		require.NotNil(t, sent.Limit)
 		assert.EqualValues(t, 5, *sent.Limit)
+	})
+
+	t.Run("limit-over-int32-is-rejected", func(t *testing.T) {
+		var got []dynamoDoc
+
+		err := str.List(t.Context(), table, &got, &list.List{Limit: math.MaxInt32 + 1})
+		require.Error(t, err)
 	})
 
 	t.Run("filter-sanitizes-unsafe-names", func(t *testing.T) {
@@ -1041,7 +1105,7 @@ func TestDynamoDB_List(t *testing.T) {
 		reqs := fake.scanRequests()
 		require.NotEmpty(t, reqs)
 
-		var sent dynamodb.ScanInput
+		var sent capturedScanInput
 
 		require.NoError(t, json.Unmarshal(reqs[len(reqs)-1].body, &sent))
 		require.NotNil(t, sent.FilterExpression)
@@ -1050,7 +1114,7 @@ func TestDynamoDB_List(t *testing.T) {
 		var foundSanitized bool
 
 		for placeholder, real := range sent.ExpressionAttributeNames {
-			if aws.StringValue(real) == "created-at" {
+			if real == "created-at" {
 				assert.Regexp(t, `^#f[A-Za-z0-9_]+$`, placeholder)
 
 				foundSanitized = true
@@ -1061,18 +1125,18 @@ func TestDynamoDB_List(t *testing.T) {
 	})
 
 	t.Run("offset-and-limit-across-pages", func(t *testing.T) {
-		items := []map[string]*dynamodb.AttributeValue{
-			{"id": {S: aws.String("a")}, "name": {S: aws.String("a")}},
-			{"id": {S: aws.String("b")}, "name": {S: aws.String("b")}},
-			{"id": {S: aws.String("c")}, "name": {S: aws.String("c")}},
+		items := []map[string]types.AttributeValue{
+			{"id": stringAttribute("a"), "name": stringAttribute("a")},
+			{"id": stringAttribute("b"), "name": stringAttribute("b")},
+			{"id": stringAttribute("c"), "name": stringAttribute("c")},
 		}
-		items2 := []map[string]*dynamodb.AttributeValue{
-			{"id": {S: aws.String("d")}, "name": {S: aws.String("d")}},
-			{"id": {S: aws.String("e")}, "name": {S: aws.String("e")}},
+		items2 := []map[string]types.AttributeValue{
+			{"id": stringAttribute("d"), "name": stringAttribute("d")},
+			{"id": stringAttribute("e"), "name": stringAttribute("e")},
 		}
 
 		restore := fake.setScanQueue([]dynamodb.ScanOutput{
-			{Items: items, LastEvaluatedKey: map[string]*dynamodb.AttributeValue{"id": {S: aws.String("c")}}},
+			{Items: items, LastEvaluatedKey: map[string]types.AttributeValue{"id": stringAttribute("c")}},
 			{Items: items2},
 		})
 		t.Cleanup(restore)

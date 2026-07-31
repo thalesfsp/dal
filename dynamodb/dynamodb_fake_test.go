@@ -1,16 +1,19 @@
 package dynamodb
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 //////
@@ -42,10 +45,12 @@ type dynamoFake struct {
 
 	// items is keyed by table name, then by the "id" attribute's string
 	// value.
-	items map[string]map[string]map[string]*dynamodb.AttributeValue
+	items map[string]map[string]map[string]types.AttributeValue
 
 	// overrides forces a specific target (e.g. "Scan") to fail.
 	overrides map[string]dynamoOverride
+
+	listTablesFailures int
 
 	// scanQueue, when non-empty, overrides Scan's response: each call pops
 	// the next entry (the last one repeats once exhausted), ignoring items.
@@ -59,7 +64,7 @@ type dynamoFake struct {
 // newDynamoFake creates a ready-to-use fake with no stored items.
 func newDynamoFake() *dynamoFake {
 	return &dynamoFake{
-		items:     map[string]map[string]map[string]*dynamodb.AttributeValue{},
+		items:     map[string]map[string]map[string]types.AttributeValue{},
 		overrides: map[string]dynamoOverride{},
 	}
 }
@@ -99,11 +104,10 @@ func (f *dynamoFake) client() *http.Client {
 // need a genuinely reachable one.
 func dynamoTestConfig(client *http.Client) *Config {
 	return &aws.Config{
-		Endpoint:    aws.String(dynamoPlaceholderEndpoint),
-		Region:      aws.String("us-east-1"),
-		Credentials: credentials.NewStaticCredentials("k", "s", ""),
-		DisableSSL:  aws.Bool(true),
-		HTTPClient:  client,
+		BaseEndpoint: aws.String(dynamoPlaceholderEndpoint),
+		Region:       "us-east-1",
+		Credentials:  credentials.NewStaticCredentialsProvider("k", "s", ""),
+		HTTPClient:   client,
 	}
 }
 
@@ -112,21 +116,21 @@ func dynamoTestConfig(client *http.Client) *Config {
 //////
 
 // putItem seeds an item directly, bypassing PutItem.
-func (f *dynamoFake) putItem(table string, item map[string]*dynamodb.AttributeValue) {
+func (f *dynamoFake) putItem(table string, item map[string]types.AttributeValue) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	id := attrString(item["id"])
 
 	if f.items[table] == nil {
-		f.items[table] = map[string]map[string]*dynamodb.AttributeValue{}
+		f.items[table] = map[string]map[string]types.AttributeValue{}
 	}
 
 	f.items[table][id] = item
 }
 
 // getItem reads an item directly, bypassing GetItem.
-func (f *dynamoFake) getItem(table, id string) (map[string]*dynamodb.AttributeValue, bool) {
+func (f *dynamoFake) getItem(table, id string) (map[string]types.AttributeValue, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -187,12 +191,16 @@ func (f *dynamoFake) scanRequests() []dynamoRequest {
 
 // attrString extracts the string value of a DynamoDB S attribute; empty if
 // av is nil or not an S.
-func attrString(av *dynamodb.AttributeValue) string {
-	if av == nil || av.S == nil {
-		return ""
+func attrString(av types.AttributeValue) string {
+	if value, ok := av.(*types.AttributeValueMemberS); ok {
+		return value.Value
 	}
 
-	return *av.S
+	return ""
+}
+
+func stringAttribute(value string) types.AttributeValue {
+	return &types.AttributeValueMemberS{Value: value}
 }
 
 //////
@@ -224,6 +232,13 @@ func (f *dynamoFake) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if op == "ListTables" && f.listTablesFailures > 0 {
+		f.listTablesFailures--
+		writeDynamoError(w, http.StatusBadRequest, "RequestLimitExceeded", "simulated throttling")
+
+		return
+	}
+
 	switch op {
 	case "ListTables":
 		f.handleListTables(w)
@@ -242,12 +257,29 @@ func (f *dynamoFake) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (f *dynamoFake) requestCount(target string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	count := 0
+	for _, request := range f.requests {
+		if request.target == target {
+			count++
+		}
+	}
+
+	return count
+}
+
 func (f *dynamoFake) handleListTables(w http.ResponseWriter) {
-	writeDynamoJSON(w, dynamodb.ListTablesOutput{TableNames: []*string{}})
+	writeDynamoJSON(w, map[string]any{"TableNames": []string{}})
 }
 
 func (f *dynamoFake) handleGetItem(w http.ResponseWriter, body []byte) {
-	var in dynamodb.GetItemInput
+	var in struct {
+		TableName string                     `json:"TableName"`
+		Key       map[string]json.RawMessage `json:"Key"`
+	}
 
 	if err := json.Unmarshal(body, &in); err != nil {
 		writeDynamoError(w, http.StatusBadRequest, "SerializationException", err.Error())
@@ -255,16 +287,25 @@ func (f *dynamoFake) handleGetItem(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	table := aws.StringValue(in.TableName)
-	id := attrString(in.Key["id"])
+	key, err := decodeDynamoItem(in.Key)
+	if err != nil {
+		writeDynamoError(w, http.StatusBadRequest, "SerializationException", err.Error())
 
-	item := f.items[table][id]
+		return
+	}
 
-	writeDynamoJSON(w, dynamodb.GetItemOutput{Item: item})
+	id := attrString(key["id"])
+
+	item := f.items[in.TableName][id]
+
+	writeDynamoJSON(w, map[string]any{"Item": encodeDynamoItem(item)})
 }
 
 func (f *dynamoFake) handlePutItem(w http.ResponseWriter, body []byte) {
-	var in dynamodb.PutItemInput
+	var in struct {
+		TableName string                     `json:"TableName"`
+		Item      map[string]json.RawMessage `json:"Item"`
+	}
 
 	if err := json.Unmarshal(body, &in); err != nil {
 		writeDynamoError(w, http.StatusBadRequest, "SerializationException", err.Error())
@@ -272,20 +313,29 @@ func (f *dynamoFake) handlePutItem(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	table := aws.StringValue(in.TableName)
-	id := attrString(in.Item["id"])
+	item, err := decodeDynamoItem(in.Item)
+	if err != nil {
+		writeDynamoError(w, http.StatusBadRequest, "SerializationException", err.Error())
 
-	if f.items[table] == nil {
-		f.items[table] = map[string]map[string]*dynamodb.AttributeValue{}
+		return
 	}
 
-	f.items[table][id] = in.Item
+	id := attrString(item["id"])
 
-	writeDynamoJSON(w, dynamodb.PutItemOutput{})
+	if f.items[in.TableName] == nil {
+		f.items[in.TableName] = map[string]map[string]types.AttributeValue{}
+	}
+
+	f.items[in.TableName][id] = item
+
+	writeDynamoJSON(w, map[string]any{})
 }
 
 func (f *dynamoFake) handleDeleteItem(w http.ResponseWriter, body []byte) {
-	var in dynamodb.DeleteItemInput
+	var in struct {
+		TableName string                     `json:"TableName"`
+		Key       map[string]json.RawMessage `json:"Key"`
+	}
 
 	if err := json.Unmarshal(body, &in); err != nil {
 		writeDynamoError(w, http.StatusBadRequest, "SerializationException", err.Error())
@@ -293,16 +343,27 @@ func (f *dynamoFake) handleDeleteItem(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	table := aws.StringValue(in.TableName)
-	id := attrString(in.Key["id"])
+	key, err := decodeDynamoItem(in.Key)
+	if err != nil {
+		writeDynamoError(w, http.StatusBadRequest, "SerializationException", err.Error())
 
-	delete(f.items[table], id)
+		return
+	}
 
-	writeDynamoJSON(w, dynamodb.DeleteItemOutput{})
+	id := attrString(key["id"])
+
+	delete(f.items[in.TableName], id)
+
+	writeDynamoJSON(w, map[string]any{})
 }
 
 func (f *dynamoFake) handleUpdateItem(w http.ResponseWriter, body []byte) {
-	var in dynamodb.UpdateItemInput
+	var in struct {
+		TableName                 string                     `json:"TableName"`
+		Key                       map[string]json.RawMessage `json:"Key"`
+		ExpressionAttributeNames  map[string]string          `json:"ExpressionAttributeNames"`
+		ExpressionAttributeValues map[string]json.RawMessage `json:"ExpressionAttributeValues"`
+	}
 
 	if err := json.Unmarshal(body, &in); err != nil {
 		writeDynamoError(w, http.StatusBadRequest, "SerializationException", err.Error())
@@ -310,16 +371,29 @@ func (f *dynamoFake) handleUpdateItem(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	table := aws.StringValue(in.TableName)
-	id := attrString(in.Key["id"])
+	key, err := decodeDynamoItem(in.Key)
+	if err != nil {
+		writeDynamoError(w, http.StatusBadRequest, "SerializationException", err.Error())
 
-	if f.items[table] == nil {
-		f.items[table] = map[string]map[string]*dynamodb.AttributeValue{}
+		return
 	}
 
-	item, ok := f.items[table][id]
+	values, err := decodeDynamoItem(in.ExpressionAttributeValues)
+	if err != nil {
+		writeDynamoError(w, http.StatusBadRequest, "SerializationException", err.Error())
+
+		return
+	}
+
+	id := attrString(key["id"])
+
+	if f.items[in.TableName] == nil {
+		f.items[in.TableName] = map[string]map[string]types.AttributeValue{}
+	}
+
+	item, ok := f.items[in.TableName][id]
 	if !ok {
-		item = map[string]*dynamodb.AttributeValue{"id": in.Key["id"]}
+		item = map[string]types.AttributeValue{"id": key["id"]}
 	}
 
 	// Apply "SET #placeholder = :placeholder, ..." naively: for every
@@ -328,14 +402,14 @@ func (f *dynamoFake) handleUpdateItem(w http.ResponseWriter, body []byte) {
 	// fake exercising the caller's code, not DynamoDB's expression engine.
 	for namePlaceholder, realName := range in.ExpressionAttributeNames {
 		suffix := strings.TrimPrefix(namePlaceholder, "#")
-		if av, ok := in.ExpressionAttributeValues[":"+suffix]; ok {
-			item[aws.StringValue(realName)] = av
+		if av, ok := values[":"+suffix]; ok {
+			item[realName] = av
 		}
 	}
 
-	f.items[table][id] = item
+	f.items[in.TableName][id] = item
 
-	writeDynamoJSON(w, dynamodb.UpdateItemOutput{})
+	writeDynamoJSON(w, map[string]any{})
 }
 
 func (f *dynamoFake) handleScan(w http.ResponseWriter, body []byte) {
@@ -347,12 +421,15 @@ func (f *dynamoFake) handleScan(w http.ResponseWriter, body []byte) {
 
 		f.scanCall++
 
-		writeDynamoJSON(w, f.scanQueue[idx])
+		writeDynamoScanOutput(w, f.scanQueue[idx])
 
 		return
 	}
 
-	var in dynamodb.ScanInput
+	var in struct {
+		TableName string       `json:"TableName"`
+		Select    types.Select `json:"Select"`
+	}
 
 	if err := json.Unmarshal(body, &in); err != nil {
 		writeDynamoError(w, http.StatusBadRequest, "SerializationException", err.Error())
@@ -360,24 +437,175 @@ func (f *dynamoFake) handleScan(w http.ResponseWriter, body []byte) {
 		return
 	}
 
-	table := aws.StringValue(in.TableName)
-
-	items := make([]map[string]*dynamodb.AttributeValue, 0, len(f.items[table]))
-	for _, item := range f.items[table] {
+	items := make([]map[string]types.AttributeValue, 0, len(f.items[in.TableName]))
+	for _, item := range f.items[in.TableName] {
 		items = append(items, item)
 	}
 
-	count := int64(len(items))
+	if len(items) > math.MaxInt32 {
+		panic("fake DynamoDB item count exceeds int32")
+	}
 
-	out := dynamodb.ScanOutput{Count: &count}
+	// The upper bound is checked immediately above.
+	out := dynamodb.ScanOutput{Count: int32(len(items))} //nolint:gosec
 
 	// Select=COUNT responses omit Items entirely, matching real DynamoDB
 	// (this is exactly the behavior the fixed prod bug depended on).
-	if aws.StringValue(in.Select) != dynamodb.SelectCount {
+	if in.Select != types.SelectCount {
 		out.Items = items
 	}
 
-	writeDynamoJSON(w, out)
+	writeDynamoScanOutput(w, out)
+}
+
+func decodeDynamoItem(item map[string]json.RawMessage) (map[string]types.AttributeValue, error) {
+	decoded := make(map[string]types.AttributeValue, len(item))
+
+	for name, raw := range item {
+		value, err := decodeDynamoAttribute(raw)
+		if err != nil {
+			return nil, err
+		}
+
+		decoded[name] = value
+	}
+
+	return decoded, nil
+}
+
+func decodeDynamoAttribute(raw json.RawMessage) (types.AttributeValue, error) {
+	var value map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, err
+	}
+
+	for kind, encoded := range value {
+		switch kind {
+		case "S":
+			var v string
+			if err := json.Unmarshal(encoded, &v); err != nil {
+				return nil, err
+			}
+
+			return stringAttribute(v), nil
+		case "N":
+			var v string
+			if err := json.Unmarshal(encoded, &v); err != nil {
+				return nil, err
+			}
+
+			return &types.AttributeValueMemberN{Value: v}, nil
+		case "BOOL":
+			var v bool
+			if err := json.Unmarshal(encoded, &v); err != nil {
+				return nil, err
+			}
+
+			return &types.AttributeValueMemberBOOL{Value: v}, nil
+		case "NULL":
+			var v bool
+			if err := json.Unmarshal(encoded, &v); err != nil {
+				return nil, err
+			}
+
+			return &types.AttributeValueMemberNULL{Value: v}, nil
+		case "B":
+			var v string
+			if err := json.Unmarshal(encoded, &v); err != nil {
+				return nil, err
+			}
+
+			decoded, err := base64.StdEncoding.DecodeString(v)
+			if err != nil {
+				return nil, err
+			}
+
+			return &types.AttributeValueMemberB{Value: decoded}, nil
+		case "M":
+			var v map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &v); err != nil {
+				return nil, err
+			}
+
+			decoded, err := decodeDynamoItem(v)
+			if err != nil {
+				return nil, err
+			}
+
+			return &types.AttributeValueMemberM{Value: decoded}, nil
+		case "L":
+			var v []json.RawMessage
+			if err := json.Unmarshal(encoded, &v); err != nil {
+				return nil, err
+			}
+
+			decoded := make([]types.AttributeValue, 0, len(v))
+			for _, element := range v {
+				attribute, err := decodeDynamoAttribute(element)
+				if err != nil {
+					return nil, err
+				}
+
+				decoded = append(decoded, attribute)
+			}
+
+			return &types.AttributeValueMemberL{Value: decoded}, nil
+		}
+	}
+
+	return nil, &json.UnsupportedValueError{Str: "unsupported DynamoDB attribute value"}
+}
+
+func encodeDynamoItem(item map[string]types.AttributeValue) map[string]any {
+	encoded := make(map[string]any, len(item))
+	for name, value := range item {
+		encoded[name] = encodeDynamoAttribute(value)
+	}
+
+	return encoded
+}
+
+func encodeDynamoAttribute(value types.AttributeValue) map[string]any {
+	switch value := value.(type) {
+	case *types.AttributeValueMemberS:
+		return map[string]any{"S": value.Value}
+	case *types.AttributeValueMemberN:
+		return map[string]any{"N": value.Value}
+	case *types.AttributeValueMemberBOOL:
+		return map[string]any{"BOOL": value.Value}
+	case *types.AttributeValueMemberNULL:
+		return map[string]any{"NULL": value.Value}
+	case *types.AttributeValueMemberB:
+		return map[string]any{"B": base64.StdEncoding.EncodeToString(value.Value)}
+	case *types.AttributeValueMemberM:
+		return map[string]any{"M": encodeDynamoItem(value.Value)}
+	case *types.AttributeValueMemberL:
+		encoded := make([]map[string]any, 0, len(value.Value))
+		for _, element := range value.Value {
+			encoded = append(encoded, encodeDynamoAttribute(element))
+		}
+
+		return map[string]any{"L": encoded}
+	default:
+		return map[string]any{}
+	}
+}
+
+func writeDynamoScanOutput(w http.ResponseWriter, output dynamodb.ScanOutput) {
+	items := make([]map[string]any, 0, len(output.Items))
+	for _, item := range output.Items {
+		items = append(items, encodeDynamoItem(item))
+	}
+
+	response := map[string]any{
+		"Count": output.Count,
+		"Items": items,
+	}
+	if len(output.LastEvaluatedKey) > 0 {
+		response["LastEvaluatedKey"] = encodeDynamoItem(output.LastEvaluatedKey)
+	}
+
+	writeDynamoJSON(w, response)
 }
 
 //////

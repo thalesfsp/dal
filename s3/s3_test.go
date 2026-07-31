@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/thalesfsp/dal/v3/internal/shared"
 	"github.com/thalesfsp/params/v2/count"
@@ -78,11 +78,10 @@ func TestNew(t *testing.T) {
 			ctx, cancel := context.WithTimeout(tt.args.ctx, shared.DefaultTimeout)
 			defer cancel()
 
-			cfg := &Config{
-				Region: aws.String(region),
-			}
+			cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+			assert.NoError(t, err)
 
-			str, err := New(ctx, bucket, cfg)
+			str, err := New(ctx, bucket, &cfg)
 			assert.NoError(t, err)
 			assert.NotNil(t, str)
 
@@ -277,11 +276,10 @@ func TestNew_RetrieveSigned(t *testing.T) {
 			ctx, cancel := context.WithTimeout(tt.args.ctx, shared.DefaultTimeout)
 			defer cancel()
 
-			cfg := &Config{
-				Region: aws.String(region),
-			}
+			cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+			assert.NoError(t, err)
 
-			str, err := New(ctx, bucket, cfg)
+			str, err := New(ctx, bucket, &cfg)
 			assert.NoError(t, err)
 			assert.NotNil(t, str)
 
