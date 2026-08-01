@@ -19,7 +19,7 @@ import (
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v3/internal/customapm"
-	"github.com/thalesfsp/dal/v3/internal/logging"
+	"github.com/thalesfsp/dal/v3/internal/envelope"
 	"github.com/thalesfsp/dal/v3/internal/shared"
 	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
@@ -29,9 +29,6 @@ import (
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
 	"github.com/thalesfsp/status"
-	"github.com/thalesfsp/sypl/v2"
-	"github.com/thalesfsp/sypl/v2/fields"
-	"github.com/thalesfsp/sypl/v2/level"
 	"github.com/thalesfsp/validation"
 )
 
@@ -88,356 +85,157 @@ type S3 struct {
 
 // Count returns the number of items in the storage.
 func (s *S3) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
-	//////
-	// APM Tracing.
-	//////
+	return envelope.Run[count.Count, int64](ctx, envelope.Config[count.Count]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Counted.String(),
+		Target:         target,
+		Param:          prm,
+		Options:        options,
+		SuccessCounter: s.GetCounterCounted(),
+		FailureCounter: s.GetCounterCountedFailed(),
+		NewParams: func() (*count.Count, error) {
+			params, err := count.New()
+			if err == nil {
+				params.Search = "*"
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Counted.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*count.Count]()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := count.New()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-	}
-
-	// Application's default values.
-	finalParam.Search = "*"
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Count.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, "", target, nil, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-		}
-	}
-
-	input := &awss3.ListObjectsV2Input{
-		Bucket: aws.String(s.Bucket),
-	}
-
-	var fileCount int
-
-	paginator := awss3.NewListObjectsV2Paginator(s.Client, input)
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return 0, customapm.TraceError(ctx, customerror.NewFailedToError(
-				storage.OperationCount.String(),
-				customerror.WithError(err),
-			), s.GetLogger(), s.GetCounterCountedFailed())
+			return params, err
+		},
+	}, func(runCtx context.Context, _ *count.Count) (envelope.Result[int64], error) {
+		input := &awss3.ListObjectsV2Input{
+			Bucket: aws.String(s.Bucket),
 		}
 
-		fileCount += len(page.Contents)
-	}
+		var fileCount int
 
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, "", target, int64(fileCount), finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
+		paginator := awss3.NewListObjectsV2Paginator(s.Client, input)
+		for paginator.HasMorePages() {
+			page, err := paginator.NextPage(runCtx)
+			if err != nil {
+				return envelope.Result[int64]{}, customerror.NewFailedToError(
+					storage.OperationCount.String(),
+					customerror.WithError(err),
+				)
+			}
+
+			fileCount += len(page.Contents)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		result := int64(fileCount)
 
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Counted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterCounted().Add(1)
-
-	return int64(fileCount), nil
+		return envelope.Result[int64]{Value: result, PostHookData: result}, nil
+	})
 }
 
 // Delete removes data.
 func (s *S3) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterDeletedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[delete.Delete, envelope.Void](ctx, envelope.Config[delete.Delete]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Deleted.String(),
+		ID:             id,
+		Target:         target,
+		Options:        options,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterDeleted(),
+		FailureCounter: s.GetCounterDeletedFailed(),
+		NewParams: func() (*delete.Delete, error) {
+			params, err := delete.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Deleted.String(),
-	)
-	defer span.End()
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*delete.Delete]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
+			return params, err
+		},
+	}, func(runCtx context.Context, _ *delete.Delete) (envelope.Result[envelope.Void], error) {
+		input := &awss3.DeleteObjectInput{
+			Bucket: aws.String(s.Bucket),
+			Key:    aws.String(trgt),
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := delete.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-	}
-
-	// Application's default values.
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-	}
-
-	//////
-	// Delete.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, target, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-		}
-	}
-
-	input := &awss3.DeleteObjectInput{
-		Bucket: aws.String(s.Bucket),
-		Key:    aws.String(trgt),
-	}
-
-	if _, err := s.Client.DeleteObject(ctx, input); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
+		if _, err := s.Client.DeleteObject(runCtx, input); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
 				storage.OperationDelete.String(),
 				customerror.WithError(err),
-			),
-			s.GetLogger(),
-			s.GetCounterDeletedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, target, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		return envelope.Result[envelope.Void]{}, nil
+	})
 
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Deleted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterDeleted().Add(1)
-
-	return nil
+	return err
 }
 
 // Retrieve data.
 func (s *S3) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[retrieve.Retrieve, envelope.Void](ctx, envelope.Config[retrieve.Retrieve]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Retrieved.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        options,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterRetrieved(),
+		FailureCounter: s.GetCounterRetrievedFailed(),
+		NewParams: func() (*retrieve.Retrieve, error) {
+			params, err := retrieve.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Retrieved.String(),
-	)
-	defer span.End()
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*retrieve.Retrieve]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := retrieve.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-	}
-
-	//////
-	// Retrieve.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-		}
-	}
-
-	input := &awss3.GetObjectInput{
-		Bucket: aws.String(s.Bucket),
-		Key:    aws.String(trgt),
-	}
-
-	output, err := s.Client.GetObject(ctx, input)
-	if err != nil {
-		var noSuchKey *types.NoSuchKey
-		var responseError *smithyhttp.ResponseError
-
-		if errors.As(err, &noSuchKey) ||
-			(errors.As(err, &responseError) && responseError.HTTPStatusCode() == http.StatusNotFound) {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewHTTPError(http.StatusNotFound),
-				s.GetLogger(),
-				s.GetCounterRetrievedFailed())
+			return params, err
+		},
+	}, func(runCtx context.Context, _ *retrieve.Retrieve) (envelope.Result[envelope.Void], error) {
+		input := &awss3.GetObjectInput{
+			Bucket: aws.String(s.Bucket),
+			Key:    aws.String(trgt),
 		}
 
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationRetrieve.String(),
+		output, err := s.Client.GetObject(runCtx, input)
+		if err != nil {
+			var noSuchKey *types.NoSuchKey
+			var responseError *smithyhttp.ResponseError
+
+			if errors.As(err, &noSuchKey) ||
+				(errors.As(err, &responseError) && responseError.HTTPStatusCode() == http.StatusNotFound) {
+				return envelope.Result[envelope.Void]{}, customerror.NewHTTPError(http.StatusNotFound)
+			}
+
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationRetrieve.String(),
 				customerror.WithError(err),
-			),
-			s.GetLogger(),
-			s.GetCounterRetrievedFailed())
-	}
-
-	// The body is an open HTTP response stream; it must always be closed.
-	defer output.Body.Close()
-
-	data, err := shared.ReadAll(output.Body)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			err,
-			s.GetLogger(),
-			s.GetCounterRetrievedFailed())
-	}
-
-	if err := shared.Unmarshal(data, v); err != nil {
-		return customapm.TraceError(
-			ctx,
-			err,
-			s.GetLogger(),
-			s.GetCounterRetrievedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		// The body is an open HTTP response stream; it must always be closed.
+		defer output.Body.Close()
 
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Retrieved.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
+		data, err := shared.ReadAll(output.Body)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
 
-	//////
-	// Metrics.
-	//////
+		if err := shared.Unmarshal(data, v); err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
 
-	s.GetCounterRetrieved().Add(1)
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	return nil
+	return err
 }
 
 // List data.
@@ -445,110 +243,54 @@ func (s *S3) Retrieve(ctx context.Context, id, target string, v any, prm *retrie
 // List returns the keys in the configured bucket. Search, Sort, Limit, Offset,
 // and Fields are not currently applied.
 func (s *S3) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[list.List, envelope.Void](ctx, envelope.Config[list.List]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Listed.String(),
+		Target:         target,
+		HookData:       v,
+		Param:          prm,
+		Options:        options,
+		SuccessCounter: s.GetCounterListed(),
+		FailureCounter: s.GetCounterListedFailed(),
+		NewParams: func() (*list.List, error) {
+			params, err := list.New()
+			if err == nil {
+				params.Search = "*"
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Listed.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*list.List]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
+			return params, err
+		},
+	}, func(runCtx context.Context, _ *list.List) (envelope.Result[envelope.Void], error) {
+		input := &awss3.ListObjectsV2Input{
+			Bucket: aws.String(s.Bucket),
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
+		keys := ResponseListKeys{[]string{}}
 
-	finalParam, err := list.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	// Application's default values.
-	finalParam.Search = "*"
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Query.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, "", target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-		}
-	}
-
-	input := &awss3.ListObjectsV2Input{
-		Bucket: aws.String(s.Bucket),
-	}
-
-	keys := ResponseListKeys{[]string{}}
-
-	paginator := awss3.NewListObjectsV2Paginator(s.Client, input)
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError(storage.OperationList.String(),
+		paginator := awss3.NewListObjectsV2Paginator(s.Client, input)
+		for paginator.HasMorePages() {
+			page, err := paginator.NextPage(runCtx)
+			if err != nil {
+				return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+					storage.OperationList.String(),
 					customerror.WithError(err),
-				),
-				s.GetLogger(), s.GetCounterListedFailed(),
-			)
+				)
+			}
+
+			for _, object := range page.Contents {
+				keys.Keys = append(keys.Keys, *object.Key)
+			}
 		}
 
-		for _, object := range page.Contents {
-			keys.Keys = append(keys.Keys, *object.Key)
+		if err := storage.ParseToStruct(keys, v); err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
 
-	if err := storage.ParseToStruct(keys, v); err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, "", target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Listed.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterListed().Add(1)
-
-	return nil
+	return err
 }
 
 // BulkCreate creates data with at most eight concurrent PUTs. Eight provides
@@ -693,301 +435,173 @@ func assembleS3BulkResult(
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
 func (s *S3) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Created.String(),
+	var (
+		trgt        string
+		contentFile *os.File
 	)
-	defer span.End()
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*create.Create]()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+	defer func() {
+		if contentFile != nil {
+			_ = contentFile.Close()
 		}
-	}
+	}()
 
-	//////
-	// Params initialization.
-	//////
+	return envelope.Run[create.Create, string](ctx, envelope.Config[create.Create]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Created.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        options,
+		SuccessCounter: s.GetCounterCreated(),
+		FailureCounter: s.GetCounterCreatedFailed(),
+		NewParams: func() (*create.Create, error) {
+			params, err := create.New()
+			if err != nil {
+				return nil, err
+			}
 
-	finalParam, err := create.New()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
+			params.TTL = 0
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-	finalParam.TTL = 0
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	//////
-	// Create.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+			return params, err
+		},
+	}, func(runCtx context.Context, _ *create.Create) (envelope.Result[string], error) {
+		// Prepare the input for the S3 upload request.
+		uploadInput := &transfermanager.UploadObjectInput{
+			Bucket: aws.String(s.Bucket),
+			Key:    aws.String(trgt),
 		}
-	}
 
-	// Prepare the input for the S3 upload request.
-	uploadInput := &transfermanager.UploadObjectInput{
-		Bucket: aws.String(s.Bucket),
-		Key:    aws.String(trgt),
-	}
+		// Use a type switch to handle different types of content.
+		switch content := v.(type) {
+		case *os.File:
+			contentFile = content
 
-	// Use a type switch to handle different types of content.
-	switch content := v.(type) {
-	case *os.File:
-		// If the content is a file, ensure it gets closed after we're done with it.
-		defer content.Close()
+			// Read the entire content of the file into a byte slice.
+			b, err := shared.ReadAll(content)
+			if err != nil {
+				return envelope.Result[string]{}, err
+			}
 
-		// Read the entire content of the file into a byte slice.
-		b, err := shared.ReadAll(content)
+			// Set the body of the S3 upload request to the body reader.
+			uploadInput.Body = bytes.NewReader(b)
+
+		case string:
+			// Set the body of the S3 upload request to the body reader.
+			uploadInput.Body = bytes.NewReader([]byte(content))
+
+		case []byte:
+			// Raw bytes are uploaded as-is (mirrors Update; without this case they
+			// would be JSON-marshaled into a base64 string).
+			uploadInput.Body = bytes.NewReader(content)
+
+		default:
+			// If the content is neither a file nor a string, assume it's a struct and marshal it to JSON.
+			jsonData, err := shared.Marshal(content)
+			if err != nil {
+				return envelope.Result[string]{}, err
+			}
+
+			// Set the body and the content type of the S3 upload request.
+			uploadInput.Body = bytes.NewReader(jsonData)
+			uploadInput.ContentType = aws.String("application/json")
+		}
+
+		// Perform the S3 upload request.
+		uO, err := s.uploader.UploadObject(runCtx, uploadInput)
 		if err != nil {
-			// If an error occurred, log it and return.
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-		}
-
-		// Set the body of the S3 upload request to the body reader.
-		uploadInput.Body = bytes.NewReader(b)
-
-	case string:
-		// Set the body of the S3 upload request to the body reader.
-		uploadInput.Body = bytes.NewReader([]byte(content))
-
-	case []byte:
-		// Raw bytes are uploaded as-is (mirrors Update; without this case they
-		// would be JSON-marshaled into a base64 string).
-		uploadInput.Body = bytes.NewReader(content)
-
-	default:
-		// If the content is neither a file nor a string, assume it's a struct and marshal it to JSON.
-		jsonData, err := shared.Marshal(content)
-		if err != nil {
-			// If an error occurred, log it and return.
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-		}
-
-		// Set the body and the content type of the S3 upload request.
-		uploadInput.Body = bytes.NewReader(jsonData)
-		uploadInput.ContentType = aws.String("application/json")
-	}
-
-	// Perform the S3 upload request.
-	uO, err := s.uploader.UploadObject(ctx, uploadInput)
-	if err != nil {
-		// If an error occurred, log it and return.
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
+			return envelope.Result[string]{}, customerror.NewFailedToError(
 				storage.OperationCreate.String(),
 				customerror.WithError(err),
-			),
-			s.GetLogger(),
-			s.GetCounterCreatedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Created.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterCreated().Add(1)
-
-	return aws.ToString(uO.Location), nil
+		return envelope.Result[string]{Value: aws.ToString(uO.Location), PostHookData: v}, nil
+	})
 }
 
 // Update data.
 //
 // NOTE: Not truly an update, it's an insert.
 func (s *S3) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterUpdatedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[update.Update, envelope.Void](ctx, envelope.Config[update.Update]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Updated.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        options,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterUpdated(),
+		FailureCounter: s.GetCounterUpdatedFailed(),
+		NewParams: func() (*update.Update, error) {
+			params, err := update.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Updated.String(),
-	)
-	defer span.End()
+			params.TTL = 0
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*update.Update]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := update.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	finalParam.TTL = 0
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	//////
-	// Create.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-		}
-	}
-
-	// Prepare the input for the S3 upload request.
-	uploadInput := &transfermanager.UploadObjectInput{
-		Bucket: aws.String(s.Bucket),
-		Key:    aws.String(trgt),
-	}
-
-	// Use a type switch to handle different types of content.
-	switch content := v.(type) {
-	case *os.File:
-		// Read the entire content of the file into a byte slice.
-		b, err := shared.ReadAll(content)
-		if err != nil {
-			// If an error occurred, log it and return.
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
+			return params, err
+		},
+	}, func(runCtx context.Context, _ *update.Update) (envelope.Result[envelope.Void], error) {
+		// Prepare the input for the S3 upload request.
+		uploadInput := &transfermanager.UploadObjectInput{
+			Bucket: aws.String(s.Bucket),
+			Key:    aws.String(trgt),
 		}
 
-		// Set the body of the S3 upload request to the body reader.
-		uploadInput.Body = bytes.NewReader(b)
+		// Use a type switch to handle different types of content.
+		switch content := v.(type) {
+		case *os.File:
+			// Read the entire content of the file into a byte slice.
+			b, err := shared.ReadAll(content)
+			if err != nil {
+				return envelope.Result[envelope.Void]{}, err
+			}
 
-	case string:
-		// Set the body of the S3 upload request to the body reader.
-		uploadInput.Body = bytes.NewReader([]byte(content))
+			// Set the body of the S3 upload request to the body reader.
+			uploadInput.Body = bytes.NewReader(b)
 
-	case []byte:
-		uploadInput.Body = bytes.NewReader(content)
+		case string:
+			// Set the body of the S3 upload request to the body reader.
+			uploadInput.Body = bytes.NewReader([]byte(content))
 
-	default:
-		// If the content is neither a file nor a string, assume it's a struct and marshal it to JSON.
-		jsonData, err := shared.Marshal(content)
-		if err != nil {
-			// If an error occurred, log it and return.
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
+		case []byte:
+			uploadInput.Body = bytes.NewReader(content)
+
+		default:
+			// If the content is neither a file nor a string, assume it's a struct and marshal it to JSON.
+			jsonData, err := shared.Marshal(content)
+			if err != nil {
+				return envelope.Result[envelope.Void]{}, err
+			}
+
+			// Set the body and the content type of the S3 upload request.
+			uploadInput.Body = bytes.NewReader(jsonData)
+			uploadInput.ContentType = aws.String("application/json")
 		}
 
-		// Set the body and the content type of the S3 upload request.
-		uploadInput.Body = bytes.NewReader(jsonData)
-		uploadInput.ContentType = aws.String("application/json")
-	}
-
-	// Perform the S3 upload request.
-	if _, err := s.uploader.UploadObject(ctx, uploadInput); err != nil {
-		// If an error occurred, log it and return.
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
+		// Perform the S3 upload request.
+		if _, err := s.uploader.UploadObject(runCtx, uploadInput); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
 				storage.OperationCreate.String(),
 				customerror.WithError(err),
-			),
-			s.GetLogger(),
-			s.GetCounterUpdatedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Updated.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterUpdated().Add(1)
-
-	return nil
+	return err
 }
 
 // GetClient returns the client.

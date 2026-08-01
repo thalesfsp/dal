@@ -10,6 +10,7 @@ import (
 
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v3/internal/customapm"
+	"github.com/thalesfsp/dal/v3/internal/envelope"
 	"github.com/thalesfsp/dal/v3/internal/logging"
 	"github.com/thalesfsp/dal/v3/internal/shared"
 	"github.com/thalesfsp/dal/v3/storage"
@@ -138,509 +139,260 @@ func collectBucketItems(b *bbolt.Bucket, pattern string, docs *[][]byte) error {
 
 // Count returns the number of items in the storage.
 func (s *Bolt) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
-	//////
-	// APM Tracing.
-	//////
+	var trgt string
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Counted.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*count.Count]()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := count.New()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-	}
-
-	// Application's default values.
-	finalParam.Search = "*"
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-	}
-
-	//////
-	// Count.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, "", target, nil, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-		}
-	}
-
-	pattern := finalParam.Search
-	if pattern == "" {
-		pattern = "*"
-	}
-
-	var (
-		n        int
-		matchErr error
-	)
-
-	// A missing bucket must not look like a plausible count of 0 — it means
-	// the target was never written to, which is an error, not an empty
-	// result.
-	if viewErr := s.Client.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(trgt))
-		if b == nil {
-			return bbolterrors.ErrBucketNotFound
-		}
-
-		return b.ForEach(func(k, _ []byte) error {
-			matched, err := bucketMatches(pattern, k)
+	return envelope.Run[count.Count, int64](ctx, envelope.Config[count.Count]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Counted.String(),
+		Target:         target,
+		Options:        options,
+		SuccessCounter: s.GetCounterCounted(),
+		FailureCounter: s.GetCounterCountedFailed(),
+		NewParams: func() (*count.Count, error) {
+			params, err := count.New()
 			if err != nil {
-				matchErr = err
-
-				return err
+				return nil, err
 			}
 
-			if matched {
-				n++
-			}
+			params.Search = "*"
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-			return nil
-		})
-	}); viewErr != nil {
-		if matchErr != nil {
-			return 0, customapm.TraceError(ctx, matchErr, s.GetLogger(), s.GetCounterCountedFailed())
+			return params, err
+		},
+	}, func(_ context.Context, params *count.Count) (envelope.Result[int64], error) {
+		pattern := params.Search
+		if pattern == "" {
+			pattern = "*"
 		}
 
-		return 0, customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCount.String(), customerror.WithError(viewErr)),
-			s.GetLogger(),
-			s.GetCounterCountedFailed(),
+		var (
+			n        int
+			matchErr error
 		)
-	}
 
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, "", target, int64(n), finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
+		// A missing bucket must not look like a plausible count of 0 — it means
+		// the target was never written to, which is an error, not an empty
+		// result.
+		if viewErr := s.Client.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(trgt))
+			if b == nil {
+				return bbolterrors.ErrBucketNotFound
+			}
+
+			return b.ForEach(func(k, _ []byte) error {
+				matched, err := bucketMatches(pattern, k)
+				if err != nil {
+					matchErr = err
+
+					return err
+				}
+
+				if matched {
+					n++
+				}
+
+				return nil
+			})
+		}); viewErr != nil {
+			if matchErr != nil {
+				return envelope.Result[int64]{}, matchErr
+			}
+
+			return envelope.Result[int64]{}, customerror.NewFailedToError(
+				storage.OperationCount.String(),
+				customerror.WithError(viewErr),
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		result := int64(n)
 
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Counted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterCounted().Add(1)
-
-	return int64(n), nil
+		return envelope.Result[int64]{Value: result, PostHookData: result}, nil
+	})
 }
 
 // Delete removes data.
 func (s *Bolt) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterDeletedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[delete.Delete, envelope.Void](ctx, envelope.Config[delete.Delete]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Deleted.String(),
+		ID:             id,
+		Target:         target,
+		Options:        options,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterDeleted(),
+		FailureCounter: s.GetCounterDeletedFailed(),
+		NewParams: func() (*delete.Delete, error) {
+			params, err := delete.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Deleted.String(),
-	)
-	defer span.End()
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-	//////
-	// Options initialization.
-	//////
+			return params, err
+		},
+	}, func(_ context.Context, _ *delete.Delete) (envelope.Result[envelope.Void], error) {
+		if err := s.Client.Update(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(trgt))
+			if b == nil {
+				// Nothing was ever created under this target, so there's
+				// nothing to delete — an idempotent success, consistent with
+				// how `file.Delete` and `sftp.Delete` treat a missing file.
+				return nil
+			}
 
-	o, err := storage.NewOptions[*delete.Delete]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := delete.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-	}
-
-	// Application's default values.
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-	}
-
-	//////
-	// Delete.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, target, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-		}
-	}
-
-	if err := s.Client.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(trgt))
-		if b == nil {
-			// Nothing was ever created under this target, so there's
-			// nothing to delete — an idempotent success, consistent with
-			// how `file.Delete` and `sftp.Delete` treat a missing file.
-			return nil
+			return b.Delete([]byte(id))
+		}); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationDelete.String(),
+				customerror.WithError(err),
+			)
 		}
 
-		return b.Delete([]byte(id))
-	}); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationDelete.String(), customerror.WithError(err)),
-			s.GetLogger(),
-			s.GetCounterDeletedFailed(),
-		)
-	}
+		return envelope.Result[envelope.Void]{}, nil
+	})
 
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, target, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Deleted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterDeleted().Add(1)
-
-	return nil
+	return err
 }
 
 // Retrieve data.
 func (s *Bolt) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[retrieve.Retrieve, envelope.Void](ctx, envelope.Config[retrieve.Retrieve]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Retrieved.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        options,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterRetrieved(),
+		FailureCounter: s.GetCounterRetrievedFailed(),
+		NewParams: func() (*retrieve.Retrieve, error) {
+			params, err := retrieve.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Retrieved.String(),
-	)
-	defer span.End()
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-	//////
-	// Options initialization.
-	//////
+			return params, err
+		},
+	}, func(_ context.Context, _ *retrieve.Retrieve) (envelope.Result[envelope.Void], error) {
+		// The value bytes bbolt hands back are only valid for the life of the
+		// transaction, so decode into `v` from inside the closure instead of
+		// copying them out.
+		viewErr := s.Client.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(trgt))
+			if b == nil {
+				return errKeyNotFound
+			}
 
-	o, err := storage.NewOptions[*retrieve.Retrieve]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-	}
+			raw := b.Get([]byte(id))
+			if raw == nil {
+				return errKeyNotFound
+			}
 
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-		}
-	}
+			return shared.Unmarshal(raw, v)
+		})
 
-	//////
-	// Params initialization.
-	//////
+		if viewErr != nil {
+			if errors.Is(viewErr, errKeyNotFound) {
+				return envelope.Result[envelope.Void]{}, customerror.NewNotFoundError(
+					storage.OperationRetrieve.String(),
+					customerror.WithError(viewErr),
+				)
+			}
 
-	finalParam, err := retrieve.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-	}
-
-	//////
-	// Retrieve.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-		}
-	}
-
-	// The value bytes bbolt hands back are only valid for the life of the
-	// transaction, so decode into `v` from inside the closure instead of
-	// copying them out.
-	viewErr := s.Client.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(trgt))
-		if b == nil {
-			return errKeyNotFound
+			return envelope.Result[envelope.Void]{}, viewErr
 		}
 
-		raw := b.Get([]byte(id))
-		if raw == nil {
-			return errKeyNotFound
-		}
-
-		return shared.Unmarshal(raw, v)
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
 	})
 
-	if viewErr != nil {
-		if errors.Is(viewErr, errKeyNotFound) {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewNotFoundError(storage.OperationRetrieve.String(), customerror.WithError(viewErr)),
-				s.GetLogger(),
-				s.GetCounterRetrievedFailed(),
-			)
-		}
-
-		return customapm.TraceError(ctx, viewErr, s.GetLogger(), s.GetCounterRetrievedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Retrieved.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterRetrieved().Add(1)
-
-	return nil
+	return err
 }
 
 // List data.
 //
 // NOTE: It uses params.List.Search (glob) to filter keys.
 func (s *Bolt) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
-	//////
-	// APM Tracing.
-	//////
+	var trgt string
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Listed.String(),
-	)
-	defer span.End()
+	_, err := envelope.Run[list.List, envelope.Void](ctx, envelope.Config[list.List]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Listed.String(),
+		Target:         target,
+		HookData:       v,
+		Options:        options,
+		SuccessCounter: s.GetCounterListed(),
+		FailureCounter: s.GetCounterListedFailed(),
+		NewParams: func() (*list.List, error) {
+			params, err := list.New()
+			if err != nil {
+				return nil, err
+			}
 
-	//////
-	// Options initialization.
-	//////
+			params.Search = "*"
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-	o, err := storage.NewOptions[*list.List]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := list.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	// Application's default values.
-	finalParam.Search = "*"
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	//////
-	// Query.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, "", target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-		}
-	}
-
-	pattern := finalParam.Search
-	if pattern == "" {
-		pattern = "*"
-	}
-
-	var docs [][]byte
-
-	// Same rationale as Count: a missing bucket must surface as an error
-	// instead of an empty-but-plausible listing.
-	if viewErr := s.Client.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(trgt))
-		if b == nil {
-			return bbolterrors.ErrBucketNotFound
+			return params, err
+		},
+	}, func(_ context.Context, params *list.List) (envelope.Result[envelope.Void], error) {
+		pattern := params.Search
+		if pattern == "" {
+			pattern = "*"
 		}
 
-		return collectBucketItems(b, pattern, &docs)
-	}); viewErr != nil {
-		// A malformed Search pattern is already a properly typed
-		// customerror courtesy of bucketMatches — propagate it as-is rather
-		// than re-wrapping it as a generic "failed to list".
-		if errors.Is(viewErr, bbolterrors.ErrBucketNotFound) {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError(storage.OperationList.String(), customerror.WithError(viewErr)),
-				s.GetLogger(),
-				s.GetCounterListedFailed(),
-			)
+		var docs [][]byte
+
+		// Same rationale as Count: a missing bucket must surface as an error
+		// instead of an empty-but-plausible listing.
+		if viewErr := s.Client.View(func(tx *bbolt.Tx) error {
+			b := tx.Bucket([]byte(trgt))
+			if b == nil {
+				return bbolterrors.ErrBucketNotFound
+			}
+
+			return collectBucketItems(b, pattern, &docs)
+		}); viewErr != nil {
+			// A malformed Search pattern is already a properly typed
+			// customerror courtesy of bucketMatches — propagate it as-is rather
+			// than re-wrapping it as a generic "failed to list".
+			if errors.Is(viewErr, bbolterrors.ErrBucketNotFound) {
+				return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+					storage.OperationList.String(),
+					customerror.WithError(viewErr),
+				)
+			}
+
+			return envelope.Result[envelope.Void]{}, viewErr
 		}
 
-		return customapm.TraceError(ctx, viewErr, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	docs, err = shared.ApplyListParams(docs, prm)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	if err := shared.Unmarshal(shared.AssembleItems(docs), v); err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, "", target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
+		docs, err := shared.ApplyListParams(docs, prm)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		if err := shared.Unmarshal(shared.AssembleItems(docs), v); err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
 
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Listed.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterListed().Add(1)
-
-	return nil
+	return err
 }
 
 type boltBulkPrepared struct {
@@ -904,246 +656,112 @@ func (s *Bolt) BulkCreate(
 // NOTE: bbolt has no per-key expiry mechanism, so `finalParam.TTL` is
 // accepted for interface parity but has no effect — same as `memory`.
 func (s *Bolt) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
-	// The id is the bucket key — an empty one would create a record that
-	// Retrieve/Delete/Update (which reject empty ids) could never address.
-	if id == "" {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterCreatedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	return envelope.Run[create.Create, string](ctx, envelope.Config[create.Create]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Created.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        options,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterCreated(),
+		FailureCounter: s.GetCounterCreatedFailed(),
+		NewParams: func() (*create.Create, error) {
+			params, err := create.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Created.String(),
-	)
-	defer span.End()
+			params.TTL = 0
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*create.Create]()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := create.New()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	finalParam.TTL = 0
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	//////
-	// Create.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-		}
-	}
-
-	b, err := shared.Marshal(v)
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	// The bucket is the target — create it lazily on first write instead of
-	// requiring a separate provisioning step.
-	if err := s.Client.Update(func(tx *bbolt.Tx) error {
-		bucket, err := tx.CreateBucketIfNotExists([]byte(trgt))
+			return params, err
+		},
+	}, func(_ context.Context, _ *create.Create) (envelope.Result[string], error) {
+		b, err := shared.Marshal(v)
 		if err != nil {
-			return err
+			return envelope.Result[string]{}, err
 		}
 
-		return bucket.Put([]byte(id), b)
-	}); err != nil {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
-			s.GetLogger(),
-			s.GetCounterCreatedFailed(),
-		)
-	}
+		// The bucket is the target — create it lazily on first write instead of
+		// requiring a separate provisioning step.
+		if err := s.Client.Update(func(tx *bbolt.Tx) error {
+			bucket, err := tx.CreateBucketIfNotExists([]byte(trgt))
+			if err != nil {
+				return err
+			}
 
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+			return bucket.Put([]byte(id), b)
+		}); err != nil {
+			return envelope.Result[string]{}, customerror.NewFailedToError(
+				storage.OperationCreate.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Created.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterCreated().Add(1)
-
-	return id, nil
+		return envelope.Result[string]{Value: id, PostHookData: v}, nil
+	})
 }
 
 // Update data.
 //
 // NOTE: Not truly an update, it's an insert.
 func (s *Bolt) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterUpdatedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[update.Update, envelope.Void](ctx, envelope.Config[update.Update]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Updated.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        options,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterUpdated(),
+		FailureCounter: s.GetCounterUpdatedFailed(),
+		NewParams: func() (*update.Update, error) {
+			params, err := update.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Updated.String(),
-	)
-	defer span.End()
+			params.TTL = 0
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*update.Update]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := update.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	finalParam.TTL = 0
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	//////
-	// Update.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-		}
-	}
-
-	b, err := shared.Marshal(v)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	// Same as Create: an "update" is an upsert here, so the bucket is
-	// created lazily if this is the first write to the target.
-	if err := s.Client.Update(func(tx *bbolt.Tx) error {
-		bucket, err := tx.CreateBucketIfNotExists([]byte(trgt))
+			return params, err
+		},
+	}, func(_ context.Context, _ *update.Update) (envelope.Result[envelope.Void], error) {
+		b, err := shared.Marshal(v)
 		if err != nil {
-			return err
+			return envelope.Result[envelope.Void]{}, err
 		}
 
-		return bucket.Put([]byte(id), b)
-	}); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
-			s.GetLogger(),
-			s.GetCounterUpdatedFailed(),
-		)
-	}
+		// Same as Create: an "update" is an upsert here, so the bucket is
+		// created lazily if this is the first write to the target.
+		if err := s.Client.Update(func(tx *bbolt.Tx) error {
+			bucket, err := tx.CreateBucketIfNotExists([]byte(trgt))
+			if err != nil {
+				return err
+			}
 
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
+			return bucket.Put([]byte(id), b)
+		}); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationUpdate.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Updated.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterUpdated().Add(1)
-
-	return nil
+	return err
 }
 
 // GetClient returns the client.
