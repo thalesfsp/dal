@@ -14,8 +14,9 @@ import (
 var (
 	ErrInvalidChunkLimit = errors.New("chunk limit must be greater than zero")
 
-	// ErrBulkCreateNotImplemented is returned by adapters whose native bulk
-	// implementation has not landed yet.
+	// ErrBulkCreateNotImplemented is available to third-party IStorage
+	// implementations that intentionally do not support bulk creates. Every
+	// adapter shipped by this module implements BulkCreate.
 	ErrBulkCreateNotImplemented = errors.New("bulk create not implemented")
 )
 

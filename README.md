@@ -99,19 +99,19 @@ func main() {
 
 ## Lifecycle
 
-`Close() error` is part of `storage.IStorage`, and every shipped adapter implements it. `Close` is idempotent: the first call releases the adapter's resources, and later calls return `nil`.
+`Close() error` is part of `storage.IStorage`, and every shipped adapter implements it. `Close` is idempotent: the first call attempts to release the resources the adapter owns, and later calls return `nil`.
 
 Closing `bolt` is a correctness requirement. bbolt holds an exclusive lock on its database file while it is open, so an unclosed storage blocks every later `Open` of that path for the process lifetime.
 
 ## List parameters
 
-`list.List` exposes `Sort`, `Limit`, `Offset`, and `Fields`. `list.New()` sets **`Limit` to 10 by default**. The five adapters that materialize documents in-process—`bolt`, `file`, `memory`, `redis`, and `sftp`—apply those four fields in the order sort, paginate, then project. `elasticsearch` and `mongodb` also translate all four; `dynamodb` translates `Limit`, `Offset`, and `Fields`, but not `Sort`.
+`list.List` exposes `Sort`, `Limit`, `Offset`, and `Fields`. `list.New()` sets **`Limit` to 10 by default**. `bolt`, `file`, `memory`, `redis`, and `sftp` apply the values in the caller's original params in the order sort, paginate, then project. Pass the value returned by `list.New()` when its default limit is wanted; a nil params pointer applies none of these four fields. `memory.List` has no defined order unless `Sort` is set because it ranges a `sync.Map`.
 
-The SQL adapters execute `Search` as the query and do not translate these four structured fields. `s3.List` does not currently apply them. `memory.List` has no defined order unless `Sort` is set because it ranges a `sync.Map`.
+`elasticsearch` and `mongodb` translate all four fields. `dynamodb` sends `Limit` and a `Fields` projection to `Scan`, skips `Offset` items client-side while consuming paginated results, and does not use `Sort`. The SQL adapters execute `Search` as the query and do not translate the four structured fields. `s3.List` does not apply them.
 
 ## Bulk create
 
-`BulkCreate` is part of `storage.IStorage`, and all twelve adapters implement it. Where the backend has a native batch primitive it is used — multi-row `INSERT` for the SQL adapters, `InsertMany` for `mongodb`, `_bulk` for `elasticsearch`, `BatchWriteItem` for `dynamodb`, and pipelining for `redis`. The rest loop internally, but behind the same contract, so the result shape does not reveal which is which.
+`BulkCreate` is part of `storage.IStorage`, and all twelve adapters implement it. The implementations use multi-row `INSERT` for the SQL adapters, bounded bbolt write transactions for `bolt`, unordered `InsertMany` for `mongodb`, `_bulk` for `elasticsearch`, `BatchWriteItem` for `dynamodb`, and pipelining for `redis`. `file` and `memory` loop over single writes; `s3` and `sftp` do the same with bounded concurrency. All use the same result contract.
 
 Its contract is explicit:
 

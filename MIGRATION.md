@@ -1,10 +1,10 @@
 # Migrating from v2 to v3
 
-This guide covers the caller-visible changes between v2.2.3 and v3.0.0. They are ordered by the chance that they will change production behavior unexpectedly: silent runtime changes first, then universal compile-time work, then adapter-specific changes.
+This guide covers the caller-visible changes between v2.2.3 and v3.0.0.
 
 ## 1. `List` applies pagination, sorting, and projection
 
-This is the highest-impact runtime change because existing calls can keep compiling while returning fewer records. `bolt`, `file`, `memory`, `redis`, and `sftp` now apply `Sort`, `Limit`, `Offset`, and `Fields`; `list.New()` supplies a default `Limit` of 10. If code used `list.New()` and relied on one of these adapters returning every match, it now receives at most ten.
+Existing calls can keep compiling while returning fewer records. `bolt`, `file`, `memory`, `redis`, and `sftp` now apply `Sort`, `Limit`, `Offset`, and `Fields`; `list.New()` supplies a default `Limit` of 10. If code used `list.New()` and relied on one of these adapters returning every match, it now receives at most ten.
 
 Before, these adapters ignored most or all of the structured fields:
 
@@ -60,7 +60,7 @@ Make the equivalent `ResponseList[T]` change for `redis` and `sftp`.
 
 ## 2. Caller params merge over defaults
 
-Every operation now copies caller-supplied, non-zero fields over validated defaults. Previously, passing a params struct replaced the defaults wholesale, so setting one field silently erased all other defaults. Inputs are not mutated.
+Operations now construct a merged params value by copying caller-supplied fields over validated defaults. Previously, passing a params struct replaced the defaults wholesale, so setting one field silently erased all other defaults. The merged value is passed to hooks and operation bodies, and the inputs are not mutated.
 
 Before, a zero field could erase a default as a side effect of setting another field:
 
@@ -71,16 +71,19 @@ prm := &list.List{
 }
 ```
 
-After, state every value that must differ from the defaults:
+After, start with `list.New()` when its defaults must affect the five in-process list implementations, then change the fields you intend to override:
 
 ```go
-prm := &list.List{
-	Sort:  customsort.SortSlice{{"title", customsort.Asc}},
-	Limit: 100,
+prm, err := list.New()
+if err != nil {
+	return err
 }
+prm.Sort = customsort.SortSlice{{"title", customsort.Asc}}
 ```
 
 Audit code that depended on zero values clearing defaults. Most zero values mean “unset.” The intentional exceptions are `delete.Soft == false`, `list.Count == 0`, and `list.Offset == 0`, which remain meaningful values.
+
+There is one current implementation exception: `bolt`, `file`, `memory`, `redis`, and `sftp` pass the original params pointer, rather than the merged value, to their structured `List` post-processing. A literal such as `&list.List{Sort: ...}` therefore does not acquire the default `Limit` for that post-processing. Pass a `list.New()` value or set `Limit` explicitly. This does not affect the merged params observed by hooks.
 
 ## 3. The module uses the v3 import path
 
