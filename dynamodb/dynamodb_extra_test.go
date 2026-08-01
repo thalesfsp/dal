@@ -61,6 +61,27 @@ func dynamoBulkTestItems(count int) []storage.BulkItem {
 	return items
 }
 
+func TestDynamoFailPendingPreservesEveryOriginalIndex(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("BatchWriteItem transport failed")
+	pending := []dynamoBulkWrite{
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 3, Item: storage.BulkItem{ID: "three"}}},
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 17, Item: storage.BulkItem{ID: "seventeen"}}},
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 52, Item: storage.BulkItem{ID: "fifty-two"}}},
+	}
+	result := storage.BulkResult{Succeeded: []int{1}}
+
+	dynamoFailPending(&result, pending, cause)
+
+	assert.Equal(t, []int{1}, result.Succeeded)
+	require.Len(t, result.Failures, len(pending))
+	for i, failure := range result.Failures {
+		assert.Equal(t, pending[i].indexed.Index, failure.Index)
+		assert.ErrorIs(t, failure.Err, cause)
+	}
+}
+
 func TestDynamoDBOffline_BulkCreate(t *testing.T) {
 	t.Run("happy path crosses 25 item cap and reads back", func(t *testing.T) {
 		str, fake := sharedTestDynamo(t)

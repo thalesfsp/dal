@@ -23,6 +23,7 @@ import (
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
 	bbolt "go.etcd.io/bbolt"
+	berrors "go.etcd.io/bbolt/errors"
 )
 
 type boltBulkDocument struct {
@@ -149,6 +150,78 @@ func TestBoltBulkCreateContextCancellationMidBatch(t *testing.T) {
 			require.Error(t, retrieveErr, "unattempted item %d", index)
 		}
 	}
+}
+
+func TestBoltCommitBulkCreateChunkWithNoPreparedItemsLeavesOutcomesUntouched(t *testing.T) {
+	t.Parallel()
+
+	str := newTestStorage(t)
+	want := []boltBulkOutcome{{succeeded: true}, {err: errors.New("existing failure")}}
+	outcomes := append([]boltBulkOutcome(nil), want...)
+
+	str.commitBulkCreateChunk(t.Context(), "bulk-docs", nil, outcomes)
+
+	if !reflect.DeepEqual(outcomes, want) {
+		t.Fatalf("commitBulkCreateChunk() outcomes = %#v, want %#v", outcomes, want)
+	}
+}
+
+func TestBoltBulkCreatePostHookFailureReportsCommittedItem(t *testing.T) {
+	t.Parallel()
+
+	str := newTestStorage(t)
+	items := boltBulkItems(3)
+	rejected := errors.New("Bolt post-hook rejected item")
+	postHook := func(_ context.Context, _ storage.IStorage, id, _ string, _ any, _ *create.Create) error {
+		if id == items[1].ID {
+			return rejected
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(t.Context(), "bulk-docs", items, nil, storage.WithPostHook(postHook))
+	if got, want := err.Error(), "bulk operation completed with 1 unsuccessful item(s)"; got != want {
+		t.Fatalf("BulkCreate() error = %q, want %q", got, want)
+	}
+	if result.Stopped {
+		t.Fatal("BulkCreate() result.Stopped = true, want false")
+	}
+	if got, want := result.Succeeded, []int{0, 2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("succeeded indices = %v, want %v", got, want)
+	}
+	require.Len(t, result.Failures, 1)
+	assert.Equal(t, 1, result.Failures[0].Index)
+	assert.ErrorIs(t, result.Failures[0].Err, rejected)
+	assert.ErrorIs(t, err, rejected)
+
+	for index, item := range items {
+		var got boltBulkDocument
+		require.NoError(t, str.Retrieve(t.Context(), item.ID, "bulk-docs", &got, nil), "committed item %d", index)
+		assert.Equal(t, item.Value, got)
+	}
+}
+
+func TestBoltBulkCreateTransactionFailureFansOutToEveryPreparedItem(t *testing.T) {
+	t.Parallel()
+
+	str := newTestStorage(t)
+	require.NoError(t, str.Close())
+	items := boltBulkItems(3)
+
+	result, err := str.BulkCreate(t.Context(), "bulk-docs", items, nil)
+	if got, want := err.Error(), "bulk operation completed with 3 unsuccessful item(s)"; got != want {
+		t.Fatalf("BulkCreate() error = %q, want %q", got, want)
+	}
+	assert.False(t, result.Stopped)
+	assert.Empty(t, result.Succeeded)
+	require.Len(t, result.Failures, len(items))
+	for index, failure := range result.Failures {
+		assert.Equal(t, index, failure.Index)
+		assert.Equal(t, "failed to create. Original Error: database not open", failure.Err.Error())
+		assert.ErrorIs(t, failure.Err, berrors.ErrDatabaseNotOpen)
+	}
+	assert.ErrorIs(t, err, berrors.ErrDatabaseNotOpen)
 }
 
 //////

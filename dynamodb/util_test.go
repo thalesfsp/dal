@@ -154,6 +154,29 @@ func TestMarshalRoundTrip(t *testing.T) {
 	assert.Equal(t, "1", id.Value)
 }
 
+func TestUnmarshalItemsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	type row struct {
+		ID   string `dynamodbav:"id"`
+		Name string `dynamodbav:"name"`
+	}
+	want := []row{
+		{ID: "first", Name: "alpha"},
+		{ID: "second", Name: "beta"},
+	}
+	items := make([]map[string]types.AttributeValue, len(want))
+	for i := range want {
+		item, err := MarshalItem(want[i])
+		require.NoError(t, err)
+		items[i] = item
+	}
+
+	var got []row
+	require.NoError(t, UnmarshalItems(items, &got))
+	assert.Equal(t, want, got)
+}
+
 func ptr(value string) *string {
 	return &value
 }

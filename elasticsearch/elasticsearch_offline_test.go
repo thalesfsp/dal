@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +41,105 @@ func elasticsearchBulkTestItems(count int) []storage.BulkItem {
 	}
 
 	return items
+}
+
+func TestElasticsearchPrepareChunkErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	es := &ElasticSearch{}
+	prm := &create.Create{}
+	options, err := storage.NewOptions[*create.Create]()
+	require.NoError(t, err)
+	rejected := errors.New("Elasticsearch pre-hook rejected item")
+	options.PreHookFunc = func(
+		_ context.Context,
+		adapter storage.IStorage,
+		id string,
+		target string,
+		_ any,
+		gotPrm *create.Create,
+	) error {
+		assert.Same(t, es, adapter)
+		assert.Equal(t, "documents", target)
+		assert.Same(t, prm, gotPrm)
+		if id == "reject" {
+			return rejected
+		}
+
+		return nil
+	}
+	chunk := []storage.Indexed[storage.BulkItem]{
+		{Index: 2, Item: storage.BulkItem{ID: "", Value: "missing"}},
+		{Index: 7, Item: storage.BulkItem{ID: "reject", Value: "rejected"}},
+		{Index: 12, Item: storage.BulkItem{ID: "unmarshalable", Value: make(chan int)}},
+		{Index: 19, Item: storage.BulkItem{ID: "accepted", Value: map[string]string{"value": "ok"}}},
+	}
+	result := storage.BulkResult{}
+
+	prepared, stoppedAt := es.elasticsearchPrepareChunk(
+		t.Context(),
+		"documents",
+		chunk,
+		prm,
+		options,
+		&result,
+	)
+	assert.Equal(t, -1, stoppedAt)
+	require.Len(t, prepared, 1)
+	assert.Equal(t, 19, prepared[0].indexed.Index)
+	assert.Equal(t, []byte(`{"value":"ok"}`), prepared[0].body)
+	require.Len(t, result.Failures, 3)
+	assert.Equal(t, []int{2, 7, 12}, []int{
+		result.Failures[0].Index,
+		result.Failures[1].Index,
+		result.Failures[2].Index,
+	})
+	assert.Equal(t, "id required", result.Failures[0].Err.Error())
+	assert.ErrorIs(t, result.Failures[1].Err, rejected)
+	assert.Equal(
+		t,
+		"failed to "+"to marshal. Original Error: json: unsupported type: chan int",
+		result.Failures[2].Err.Error(),
+	)
+	var unsupportedType *json.UnsupportedTypeError
+	assert.ErrorAs(t, result.Failures[2].Err, &unsupportedType)
+	assert.Equal(t, reflect.TypeFor[chan int](), unsupportedType.Type)
+
+	canceledCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	canceledResult := storage.BulkResult{}
+	prepared, stoppedAt = es.elasticsearchPrepareChunk(
+		canceledCtx,
+		"documents",
+		chunk[3:],
+		prm,
+		options,
+		&canceledResult,
+	)
+	assert.Empty(t, prepared)
+	assert.Equal(t, 0, stoppedAt)
+	assert.Empty(t, canceledResult.Failures)
+}
+
+func TestElasticsearchFailPreparedPreservesEveryOriginalIndex(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("bulk response could not be decoded")
+	prepared := []elasticsearchBulkDocument{
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 3, Item: storage.BulkItem{ID: "three"}}},
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 17, Item: storage.BulkItem{ID: "seventeen"}}},
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 104, Item: storage.BulkItem{ID: "one-oh-four"}}},
+	}
+	result := storage.BulkResult{Succeeded: []int{1}}
+
+	elasticsearchFailPrepared(&result, prepared, cause)
+
+	assert.Equal(t, []int{1}, result.Succeeded)
+	require.Len(t, result.Failures, len(prepared))
+	for i, failure := range result.Failures {
+		assert.Equal(t, prepared[i].indexed.Index, failure.Index)
+		assert.ErrorIs(t, failure.Err, cause)
+	}
 }
 
 func TestElasticSearchOffline_BulkCreate(t *testing.T) {
