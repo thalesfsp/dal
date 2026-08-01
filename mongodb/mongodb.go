@@ -13,7 +13,7 @@ import (
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v3/internal/customapm"
-	"github.com/thalesfsp/dal/v3/internal/logging"
+	"github.com/thalesfsp/dal/v3/internal/envelope"
 	"github.com/thalesfsp/dal/v3/internal/shared"
 	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
@@ -24,9 +24,6 @@ import (
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
 	"github.com/thalesfsp/status"
-	"github.com/thalesfsp/sypl/v2"
-	"github.com/thalesfsp/sypl/v2/fields"
-	"github.com/thalesfsp/sypl/v2/level"
 	"github.com/thalesfsp/validation"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -147,401 +144,200 @@ func decodeCursor(ctx context.Context, cursor *mongo.Cursor, v any) error {
 	return nil
 }
 
+// mongoEnvelopeOptions preserves MongoDB's option-default order and passes
+// the collection name resolved inside Run to the user's hooks.
+func mongoEnvelopeOptions[T any](
+	defaultDatabase string,
+	database, target *string,
+	options []storage.Func[T],
+) []storage.Func[T] {
+	result := make([]storage.Func[T], 0, len(options)+2)
+	result = append(result, storage.WithDatabase[T](defaultDatabase))
+	result = append(result, options...)
+	result = append(result, func(o *storage.Options[T]) error {
+		*database = o.Database
+
+		if preHook := o.PreHookFunc; preHook != nil {
+			o.PreHookFunc = func(ctx context.Context, strg storage.IStorage, id, _ string, data any, param T) error {
+				return preHook(ctx, strg, id, *target, data, param)
+			}
+		}
+
+		if postHook := o.PostHookFunc; postHook != nil {
+			o.PostHookFunc = func(ctx context.Context, strg storage.IStorage, id, _ string, data any, param T) error {
+				return postHook(ctx, strg, id, *target, data, param)
+			}
+		}
+
+		return nil
+	})
+
+	return result
+}
+
 //////
 // Implements the IStorage interface.
 //////
 
 // Count returns the number of items in the storage.
 func (m *MongoDB) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		m.GetType(),
-		Name,
-		status.Counted.String(),
+	var (
+		database string
+		trgt     string
+		filter   bson.D
 	)
-	defer span.End()
 
-	//////
-	// Options initialization.
-	//////
+	return envelope.Run[count.Count, int64](ctx, envelope.Config[count.Count]{
+		Storage:        m,
+		Adapter:        Name,
+		Status:         status.Counted.String(),
+		Target:         target,
+		Options:        mongoEnvelopeOptions(m.Database, &database, &trgt, options),
+		SuccessCounter: m.GetCounterCounted(),
+		FailureCounter: m.GetCounterCountedFailed(),
+		NewParams: func() (*count.Count, error) {
+			params, err := count.New()
+			if err != nil {
+				return nil, err
+			}
 
-	o, err := storage.NewOptions[*count.Count]()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
-	}
+			params = shared.MergeParams(params, prm)
+			filter = bson.D{}
 
-	// Set the default database to what is set in the storage.
-	o.Database = m.Database
+			if params.Search != "" {
+				filterMap := map[string]any{}
+				if err := shared.Unmarshal([]byte(params.Search), &filterMap); err != nil {
+					return nil, err
+				}
 
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
-		}
-	}
+				filterBSON, err := bson.Marshal(filterMap)
+				if err != nil {
+					return nil, customerror.NewFailedToError("bson marshal filter", customerror.WithError(err))
+				}
 
-	//////
-	// Params initialization.
-	//////
+				if err := bson.Unmarshal(filterBSON, &filter); err != nil {
+					return nil, customerror.NewFailedToError("bson unmarshal filter", customerror.WithError(err))
+				}
+			}
 
-	finalParam, err := count.New()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
-	}
+			trgt, err = shared.TargetName(target, m.Target)
+			if err != nil {
+				return nil, err
+			}
 
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Filter.
-	//////
-
-	// Matches all.
-	filter := bson.D{}
-
-	if finalParam.Search != "" {
-		filterMap := map[string]any{}
-		if err := shared.Unmarshal([]byte(finalParam.Search), &filterMap); err != nil {
-			return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
-		}
-
-		filterBson, err := bson.Marshal(filterMap)
+			return params, nil
+		},
+	}, func(ctx context.Context, _ *count.Count) (envelope.Result[int64], error) {
+		result, err := m.Client.Database(database).Collection(trgt).CountDocuments(ctx, filter)
 		if err != nil {
-			return 0, customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError("bson marshal filter", customerror.WithError(err)),
-				m.GetLogger(),
-				m.GetCounterCountedFailed(),
+			return envelope.Result[int64]{}, customerror.NewFailedToError(
+				storage.OperationCount.String(),
+				customerror.WithError(err),
 			)
 		}
 
-		if err := bson.Unmarshal(filterBson, &filter); err != nil {
-			return 0, customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError("bson unmarshal filter", customerror.WithError(err)),
-				m.GetLogger(),
-				m.GetCounterCountedFailed(),
-			)
-		}
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, m.Target)
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
-	}
-
-	//////
-	// Count.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, m, "", trgt, nil, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
-		}
-	}
-
-	count, err := m.
-		Client.
-		Database(o.Database).
-		Collection(trgt).
-		CountDocuments(ctx, filter)
-	if err != nil {
-		return 0, customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCount.String(), customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterCountedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, "", trgt, count, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCountedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	m.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Counted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	m.GetCounterCounted().Add(1)
-
-	return count, nil
+		return envelope.Result[int64]{Value: result, PostHookData: result}, nil
+	})
 }
 
 // Delete removes data.
 func (m *MongoDB) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			m.GetLogger(),
-			m.GetCounterDeletedFailed(),
-		)
-	}
+	var database, trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[delete.Delete, envelope.Void](ctx, envelope.Config[delete.Delete]{
+		Storage:        m,
+		Adapter:        Name,
+		Status:         status.Deleted.String(),
+		ID:             id,
+		Target:         target,
+		Options:        mongoEnvelopeOptions(m.Database, &database, &trgt, options),
+		RequiresID:     true,
+		SuccessCounter: m.GetCounterDeleted(),
+		FailureCounter: m.GetCounterDeletedFailed(),
+		NewParams: func() (*delete.Delete, error) {
+			params, err := delete.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		m.GetType(),
-		Name,
-		status.Deleted.String(),
-	)
-	defer span.End()
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, m.Target)
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*delete.Delete]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
-	}
-
-	// Set the default database to what is set in the storage.
-	o.Database = m.Database
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := delete.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, m.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
-	}
-
-	//////
-	// Delete.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, m, id, trgt, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
-		}
-	}
-
-	if _, err := m.
-		Client.
-		Database(o.Database).
-		Collection(trgt).
-		DeleteOne(ctx, bson.M{idField: id}); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
+			return params, err
+		},
+	}, func(ctx context.Context, _ *delete.Delete) (envelope.Result[envelope.Void], error) {
+		if _, err := m.Client.Database(database).Collection(trgt).DeleteOne(ctx, bson.M{idField: id}); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
 				storage.OperationDelete.String(),
 				customerror.WithError(err),
-			),
-			m.GetLogger(),
-			m.GetCounterDeletedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, id, trgt, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterDeletedFailed())
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		return envelope.Result[envelope.Void]{}, nil
+	})
 
-	// Correlates the transaction, span and log, and logs it.
-	m.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Deleted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	m.GetCounterDeleted().Add(1)
-
-	return nil
+	return err
 }
 
 // Retrieve data.
 func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			m.GetLogger(),
-			m.GetCounterRetrievedFailed(),
-		)
-	}
+	var database, trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[retrieve.Retrieve, envelope.Void](ctx, envelope.Config[retrieve.Retrieve]{
+		Storage:        m,
+		Adapter:        Name,
+		Status:         status.Retrieved.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        mongoEnvelopeOptions(m.Database, &database, &trgt, options),
+		RequiresID:     true,
+		SuccessCounter: m.GetCounterRetrieved(),
+		FailureCounter: m.GetCounterRetrievedFailed(),
+		NewParams: func() (*retrieve.Retrieve, error) {
+			params, err := retrieve.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		m.GetType(),
-		Name,
-		status.Retrieved.String(),
-	)
-	defer span.End()
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, m.Target)
 
-	//////
-	// Options initialization.
-	//////
+			return params, err
+		},
+	}, func(ctx context.Context, _ *retrieve.Retrieve) (envelope.Result[envelope.Void], error) {
+		var result bson.M
 
-	o, err := storage.NewOptions[*retrieve.Retrieve]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
-	}
+		if err := m.Client.Database(database).Collection(trgt).FindOne(ctx, bson.M{idField: id}).Decode(&result); err != nil {
+			if errors.Is(err, mongo.ErrNoDocuments) {
+				return envelope.Result[envelope.Void]{}, customerror.NewHTTPError(http.StatusNotFound)
+			}
 
-	// Set the default database to what is set in the storage.
-	o.Database = m.Database
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := retrieve.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, m.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
-	}
-
-	//////
-	// Retrieve.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
-		}
-	}
-
-	var result bson.M
-
-	if err := m.
-		Client.
-		Database(o.Database).
-		Collection(trgt).
-		FindOne(ctx, bson.M{idField: id}).
-		Decode(&result); err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewHTTPError(http.StatusNotFound),
-				m.GetLogger(),
-				m.GetCounterRetrievedFailed(),
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationRetrieve.String(),
+				customerror.WithError(err),
 			)
 		}
 
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationRetrieve.String(), customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterRetrievedFailed(),
-		)
-	}
-
-	resultBytes, err := bson.Marshal(result)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("bson marshal result", customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterRetrievedFailed(),
-		)
-	}
-
-	// Convert bson to a Go value.
-	if err := bson.Unmarshal(resultBytes, v); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("bson unmarshal result", customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterRetrievedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterRetrievedFailed())
+		resultBytes, err := bson.Marshal(result)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				"bson marshal result",
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		if err := bson.Unmarshal(resultBytes, v); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				"bson unmarshal result",
+				customerror.WithError(err),
+			)
+		}
 
-	// Correlates the transaction, span and log, and logs it.
-	m.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Retrieved.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	//////
-	// Metrics.
-	//////
-
-	m.GetCounterRetrieved().Add(1)
-
-	return nil
+	return err
 }
 
 // List data.
@@ -553,164 +349,92 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 // Any accepts a bson.M filter. Sort, Limit, Offset, and Fields are translated
 // into MongoDB find options; Search is not used.
 func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List, opts ...storage.Func[*list.List]) error {
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		m.GetType(),
-		Name,
-		status.Listed.String(),
+	var (
+		database   string
+		trgt       string
+		filter     bson.M
+		cursorOpts *options.FindOptionsBuilder
 	)
-	defer span.End()
 
-	//////
-	// Options initialization.
-	//////
+	_, err := envelope.Run[list.List, envelope.Void](ctx, envelope.Config[list.List]{
+		Storage:        m,
+		Adapter:        Name,
+		Status:         status.Listed.String(),
+		Target:         target,
+		HookData:       v,
+		Options:        mongoEnvelopeOptions(m.Database, &database, &trgt, opts),
+		SuccessCounter: m.GetCounterListed(),
+		FailureCounter: m.GetCounterListedFailed(),
+		NewParams: func() (*list.List, error) {
+			params, err := list.New()
+			if err != nil {
+				return nil, err
+			}
 
-	o, err := storage.NewOptions[*list.List]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
-	}
+			params = shared.MergeParams(params, prm)
+			cursorOpts = options.Find()
 
-	// Set the default database to what is set in the storage.
-	o.Database = m.Database
+			if len(params.Fields) > 0 {
+				projection := bson.M{}
+				for _, field := range params.Fields {
+					projection[field] = 1
+				}
 
-	// Iterate over the options and apply them against params.
-	for _, option := range opts {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
-		}
-	}
+				cursorOpts.SetProjection(projection)
+			}
 
-	//////
-	// Params initialization.
-	//////
+			if len(params.Sort) > 0 {
+				sortD, err := ToMongoString(params.Sort.ToSort())
+				if err != nil {
+					return nil, err
+				}
 
-	finalParam, err := list.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
-	}
+				cursorOpts.SetSort(sortD)
+			}
 
-	finalParam = shared.MergeParams(finalParam, prm)
+			if params.Offset >= 0 {
+				cursorOpts.SetSkip(int64(params.Offset))
+			}
 
-	// Query params.
-	cursorOpts := options.Find()
+			if params.Limit >= 0 {
+				cursorOpts.SetLimit(int64(params.Limit))
+			}
 
-	// Fields.
-	if len(finalParam.Fields) > 0 {
-		projection := bson.M{}
+			if flt, ok := params.Any.(bson.M); ok {
+				filter = flt
+			}
+			if filter == nil {
+				filter = bson.M{}
+			}
 
-		for _, field := range finalParam.Fields {
-			projection[field] = 1
-		}
+			trgt, err = shared.TargetName(target, m.Target)
+			if err != nil {
+				return nil, err
+			}
 
-		cursorOpts.SetProjection(projection)
-	}
-
-	// Sort.
-	if len(finalParam.Sort) > 0 {
-		sortD, err := ToMongoString(finalParam.Sort.ToSort())
+			return params, nil
+		},
+	}, func(ctx context.Context, _ *list.List) (envelope.Result[envelope.Void], error) {
+		cursor, err := m.Client.Database(database).Collection(trgt).Find(ctx, filter, cursorOpts)
 		if err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationList.String(),
+				customerror.WithError(err),
+			)
+		}
+		defer cursor.Close(ctx)
+
+		if err := decodeCursor(ctx, cursor, v); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				"cursor iteration",
+				customerror.WithError(err),
+			)
 		}
 
-		cursorOpts.SetSort(sortD)
-	}
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	// Offset.
-	if finalParam.Offset >= 0 {
-		cursorOpts.SetSkip(int64(finalParam.Offset))
-	}
-
-	// Limit.
-	if finalParam.Limit >= 0 {
-		cursorOpts.SetLimit(int64(finalParam.Limit))
-	}
-
-	// Filter.
-	//
-	// Matches all documents
-	var filter bson.M
-
-	if flt, ok := finalParam.Any.(bson.M); ok {
-		filter = flt
-	}
-
-	// If filter is empty, matches everyrthing.
-	if filter == nil {
-		filter = bson.M{}
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, m.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
-	}
-
-	//////
-	// Query.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, m, "", trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
-		}
-	}
-
-	cursor, err := m.
-		Client.
-		Database(o.Database).
-		Collection(trgt).
-		Find(ctx, filter, cursorOpts)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationList.String(), customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterListedFailed(),
-		)
-	}
-
-	defer cursor.Close(ctx)
-
-	if err := decodeCursor(ctx, cursor, v); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("cursor iteration", customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterListedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, "", trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterListedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	m.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Listed.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	m.GetCounterListed().Add(1)
-
-	return nil
+	return err
 }
 
 // Create data.
@@ -721,249 +445,97 @@ func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List
 // WARN: MongoDB relies on the model (`v`) `_id` field to be set, otherwise it
 // will generate a new one. IT'S UP TO THE DEVELOPER TO SET THE `_ID` FIELD.
 func (m *MongoDB) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
-	if id == "" {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			m.GetLogger(),
-			m.GetCounterCreatedFailed(),
-		)
-	}
+	var database, trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	return envelope.Run[create.Create, string](ctx, envelope.Config[create.Create]{
+		Storage:        m,
+		Adapter:        Name,
+		Status:         status.Created.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        mongoEnvelopeOptions(m.Database, &database, &trgt, options),
+		RequiresID:     true,
+		SuccessCounter: m.GetCounterCreated(),
+		FailureCounter: m.GetCounterCreatedFailed(),
+		NewParams: func() (*create.Create, error) {
+			params, err := create.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		m.GetType(),
-		Name,
-		status.Created.String(),
-	)
-	defer span.End()
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, m.Target)
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*create.Create]()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
-	}
-
-	// Set the default database to what is set in the storage.
-	o.Database = m.Database
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
+			return params, err
+		},
+	}, func(ctx context.Context, _ *create.Create) (envelope.Result[string], error) {
+		if _, err := m.Client.Database(database).Collection(trgt).InsertOne(ctx, v); err != nil {
+			return envelope.Result[string]{}, customerror.NewFailedToError(
+				storage.OperationCreate.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := create.New()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, m.Target)
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
-	}
-
-	//////
-	// Create.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
-		}
-	}
-
-	if _, err := m.
-		Client.
-		Database(o.Database).
-		Collection(trgt).
-		InsertOne(ctx, v); err != nil {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterCreatedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterCreatedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	m.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Created.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	m.GetCounterCreated().Add(1)
-
-	return id, nil
+		return envelope.Result[string]{Value: id, PostHookData: v}, nil
+	})
 }
 
 // Update data.
 func (m *MongoDB) Update(ctx context.Context, id, target string, v any, prm *update.Update, opts ...storage.Func[*update.Update]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			m.GetLogger(),
-			m.GetCounterUpdatedFailed(),
-		)
-	}
+	var database, trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[update.Update, envelope.Void](ctx, envelope.Config[update.Update]{
+		Storage:        m,
+		Adapter:        Name,
+		Status:         status.Updated.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        mongoEnvelopeOptions(m.Database, &database, &trgt, opts),
+		RequiresID:     true,
+		SuccessCounter: m.GetCounterUpdated(),
+		FailureCounter: m.GetCounterUpdatedFailed(),
+		NewParams: func() (*update.Update, error) {
+			params, err := update.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		m.GetType(),
-		Name,
-		status.Updated.String(),
-	)
-	defer span.End()
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, m.Target)
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*update.Update]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
-	}
-
-	// Set the default database to what is set in the storage.
-	o.Database = m.Database
-
-	// Iterate over the options and apply them against params.
-	for _, option := range opts {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
+			return params, err
+		},
+	}, func(ctx context.Context, _ *update.Update) (envelope.Result[envelope.Void], error) {
+		b, err := shared.Marshal(v)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := update.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, m.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
-	}
-
-	//////
-	// Update.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
+		updateFields := make(map[string]any)
+		if err := shared.Unmarshal(b, &updateFields); err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
 
-	b, err := shared.Marshal(v)
-	if err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
-	}
-
-	updateFields := make(map[string]any)
-	if err := shared.Unmarshal(b, &updateFields); err != nil {
-		return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
-	}
-
-	update := bson.M{
-		"$set": updateFields,
-	}
-
-	updateResult, err := m.
-		Client.
-		Database(o.Database).
-		Collection(trgt).
-		UpdateOne(ctx, bson.M{idField: id}, update)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
-			m.GetLogger(),
-			m.GetCounterUpdatedFailed(),
-		)
-	}
-
-	// Surface updates that matched nothing as 404, consistent with Retrieve.
-	if updateResult.MatchedCount == 0 && updateResult.UpsertedCount == 0 {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewHTTPError(http.StatusNotFound),
-			m.GetLogger(),
-			m.GetCounterUpdatedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, m, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, m.GetLogger(), m.GetCounterUpdatedFailed())
+		updateResult, err := m.Client.Database(database).Collection(trgt).UpdateOne(ctx, bson.M{idField: id}, bson.M{
+			"$set": updateFields,
+		})
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationUpdate.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		if updateResult.MatchedCount == 0 && updateResult.UpsertedCount == 0 {
+			return envelope.Result[envelope.Void]{}, customerror.NewHTTPError(http.StatusNotFound)
+		}
 
-	// Correlates the transaction, span and log, and logs it.
-	m.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Updated.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	//////
-	// Metrics.
-	//////
-
-	m.GetCounterUpdated().Add(1)
-
-	return nil
+	return err
 }
 
 // GetClient returns the client.
