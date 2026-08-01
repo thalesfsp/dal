@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"regexp"
 	"sync"
 	"sync/atomic"
@@ -48,6 +49,158 @@ var errBoom = errors.New("boom")
 
 // sqliteDBSeq isolates each test in its own named in-memory database.
 var sqliteDBSeq atomic.Int64
+
+type bulkCreateRow struct {
+	ID      string  `db:"id"`
+	Name    *string `db:"name"`
+	Version string  `db:"version"`
+}
+
+func mysqlBulkItems(count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for i := range items {
+		name := fmt.Sprintf("name-%d", i)
+		id := fmt.Sprintf("bulk-%d", i)
+		items[i] = storage.BulkItem{
+			ID: id,
+			Value: bulkCreateRow{
+				ID:      id,
+				Name:    &name,
+				Version: "1.0.0",
+			},
+		}
+	}
+
+	return items
+}
+
+func mysqlBulkCount(t *testing.T, str *MySQL) int {
+	t.Helper()
+	var count int
+	require.NoError(t, str.Client.GetContext(t.Context(), &count, "SELECT COUNT(*) FROM "+shared.TableName))
+
+	return count
+}
+
+func TestBulkCreate_SQLite(t *testing.T) {
+	t.Run("happy path many items", func(t *testing.T) {
+		str := newSQLiteStorageWithTable(t)
+		items := mysqlBulkItems(60)
+
+		result, err := str.BulkCreate(t.Context(), shared.TableName, items, nil)
+		require.NoError(t, err)
+		require.True(t, result.AllSucceeded())
+		require.False(t, result.Stopped)
+		require.Len(t, result.Succeeded, len(items))
+		require.Equal(t, len(items), mysqlBulkCount(t, str))
+		for i, item := range items {
+			require.Equal(t, i, result.Succeeded[i])
+			var got bulkCreateRow
+			require.NoError(t, str.Client.GetContext(t.Context(), &got,
+				"SELECT id, name, version FROM "+shared.TableName+" WHERE id = ?", item.ID))
+			require.Equal(t, item.Value, got)
+		}
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		result, err := newSQLiteStorage(t).BulkCreate(ctx, shared.TableName, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, storage.BulkResult{}, result)
+	})
+
+	t.Run("single item", func(t *testing.T) {
+		str := newSQLiteStorageWithTable(t)
+		result, err := str.BulkCreate(t.Context(), shared.TableName, mysqlBulkItems(1), nil)
+		require.NoError(t, err)
+		require.Equal(t, []int{0}, result.Succeeded)
+		require.Equal(t, 1, mysqlBulkCount(t, str))
+	})
+
+	t.Run("partial constraint failure", func(t *testing.T) {
+		str := newSQLiteStorageWithTable(t)
+		items := mysqlBulkItems(12)
+		bad, ok := items[7].Value.(bulkCreateRow)
+		require.True(t, ok)
+		bad.Name = nil
+		items[7].Value = bad
+
+		result, err := str.BulkCreate(t.Context(), shared.TableName, items, nil)
+		require.Error(t, err)
+		require.Equal(t, 11, mysqlBulkCount(t, str))
+		require.Len(t, result.Failures, 1)
+		require.Equal(t, 7, result.Failures[0].Index)
+		require.Error(t, result.Failures[0].Err)
+	})
+
+	t.Run("chunked failure preserves original index", func(t *testing.T) {
+		str := newSQLiteStorageWithTable(t)
+		const badIndex = 340
+		itemCount := bulkPlaceholderLimit/3 + 12
+		items := mysqlBulkItems(itemCount)
+		bad, ok := items[badIndex].Value.(bulkCreateRow)
+		require.True(t, ok)
+		bad.Name = nil
+		items[badIndex].Value = bad
+
+		result, err := str.BulkCreate(t.Context(), shared.TableName, items, nil)
+		require.Error(t, err)
+		indices := make([]int, len(result.Failures))
+		for i, failure := range result.Failures {
+			indices[i] = failure.Index
+		}
+		if want := []int{badIndex}; !reflect.DeepEqual(indices, want) {
+			t.Fatalf("failure indices = %v, want %v", indices, want)
+		}
+		require.Equal(t, itemCount-1, mysqlBulkCount(t, str))
+		require.Len(t, result.Succeeded, itemCount-1)
+	})
+
+	t.Run("context cancellation keeps written batch", func(t *testing.T) {
+		str := newSQLiteStorageWithTable(t)
+		itemCount := bulkPlaceholderLimit/3 + 10
+		ctx, cancel := context.WithCancel(t.Context())
+		calls := 0
+		hook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+			calls++
+			cancel()
+
+			return nil
+		}
+
+		result, err := str.BulkCreate(ctx, shared.TableName, mysqlBulkItems(itemCount), nil, storage.WithPostHook(hook))
+		require.ErrorIs(t, err, context.Canceled)
+		require.True(t, result.Stopped)
+		require.Equal(t, 1, calls)
+		firstChunk := bulkPlaceholderLimit / 3
+		require.Equal(t, firstChunk, mysqlBulkCount(t, str))
+		require.Len(t, result.Succeeded, firstChunk)
+		require.Len(t, result.Failures, itemCount-firstChunk)
+		for i, failure := range result.Failures {
+			require.Equal(t, firstChunk+i, failure.Index)
+			require.ErrorIs(t, failure.Err, context.Canceled)
+		}
+	})
+
+	t.Run("quoted value round trips", func(t *testing.T) {
+		str := newSQLiteStorageWithTable(t)
+		items := mysqlBulkItems(1)
+		quoted := "O'Brien said 'hello'"
+		row, ok := items[0].Value.(bulkCreateRow)
+		require.True(t, ok)
+		row.Name = &quoted
+		items[0].Value = row
+
+		result, err := str.BulkCreate(t.Context(), shared.TableName, items, nil)
+		require.NoError(t, err)
+		require.Equal(t, []int{0}, result.Succeeded)
+		var got string
+		require.NoError(t, str.Client.GetContext(t.Context(), &got,
+			"SELECT name FROM "+shared.TableName+" WHERE id = ?", items[0].ID))
+		require.Equal(t, quoted, got)
+	})
+}
 
 //////
 // MySQL-to-SQLite compatibility driver.
