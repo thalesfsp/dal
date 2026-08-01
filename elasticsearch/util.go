@@ -7,7 +7,7 @@ import (
 
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"github.com/thalesfsp/customerror"
-	"github.com/thalesfsp/dal/v2/internal/shared"
+	"github.com/thalesfsp/dal/v3/internal/shared"
 )
 
 // maxCausedByDepth bounds the recursion when walking nested `caused_by`

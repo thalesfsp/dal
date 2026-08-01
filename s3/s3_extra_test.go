@@ -7,14 +7,19 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thalesfsp/customerror"
-	"github.com/thalesfsp/dal/v2/storage"
+	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/delete"
@@ -23,12 +28,8 @@ import (
 	"github.com/thalesfsp/params/v2/update"
 )
 
-// TestMain clears AWS_CA_BUNDLE once for the whole binary. The sandbox's
-// outbound-proxy setup exports it; session.New picks it up regardless of
-// what's in our *aws.Config and then requires HTTPClient.Transport to be a
-// concrete *http.Transport to install it, which localTransport (by design:
-// it never dials out) is not. Nothing in this package's tests makes a real
-// TLS connection, so the custom bundle is moot.
+// TestMain clears AWS_CA_BUNDLE once for the whole binary. Nothing in this
+// package's tests makes a real TLS connection, so the custom bundle is moot.
 func TestMain(m *testing.M) {
 	os.Unsetenv("AWS_CA_BUNDLE")
 	os.Exit(m.Run())
@@ -47,6 +48,47 @@ type sampleDoc struct {
 
 // errHook is returned by the failing branch of hookRecorder.
 var errHook = errors.New("hook failure")
+
+// closeTrackingTransport records CloseIdleConnections so a Close test can
+// assert the transport was genuinely released, not merely that Close returned
+// nil.
+type closeTrackingTransport struct {
+	next http.RoundTripper
+
+	mu         sync.Mutex
+	closeCalls int
+}
+
+func (t *closeTrackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.next.RoundTrip(req)
+}
+
+func (t *closeTrackingTransport) CloseIdleConnections() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.closeCalls++
+}
+
+func (t *closeTrackingTransport) CloseCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.closeCalls
+}
+
+var errCredentials = errors.New("credential retrieval failed")
+
+// failingCredentialsProvider drives the aws-sdk-go-v2 credential-failure path.
+type failingCredentialsProvider struct {
+	called *atomic.Bool
+}
+
+func (p failingCredentialsProvider) Retrieve(context.Context) (aws.Credentials, error) {
+	p.called.Store(true)
+
+	return aws.Credentials{}, errCredentials
+}
 
 // hookRecorder returns a storage.HookFunc that records it was called (via
 // *called) and returns err. Parameterizing err (rather than hardcoding nil or
@@ -80,22 +122,59 @@ func newTestS3(t *testing.T, fake *s3Fake) *S3 {
 	return str
 }
 
+func TestS3Offline_Close(t *testing.T) {
+	newStorage := func(t *testing.T) (*S3, *closeTrackingTransport) {
+		t.Helper()
+
+		fake := newS3Fake("close-bucket")
+		transport := &closeTrackingTransport{next: fake.client().Transport}
+		client := &http.Client{Transport: transport}
+
+		str, err := New(t.Context(), fake.bucket, s3TestConfig(s3PlaceholderEndpoint, client))
+		require.NoError(t, err)
+
+		return str, transport
+	}
+
+	t.Run("closes idle connections and is idempotent", func(t *testing.T) {
+		str, transport := newStorage(t)
+
+		require.NoError(t, str.Close())
+		require.NoError(t, str.Close())
+		assert.Equal(t, 1, transport.CloseCalls(), "Close must release the AWS HTTP client's idle connections")
+	})
+
+	t.Run("concurrent calls", func(t *testing.T) {
+		str, transport := newStorage(t)
+
+		const callers = 8
+
+		errs := make(chan error, callers)
+		for range callers {
+			go func() {
+				errs <- str.Close()
+			}()
+		}
+
+		for range callers {
+			require.NoError(t, <-errs)
+		}
+
+		assert.Equal(t, 1, transport.CloseCalls(), "idle connections must be closed exactly once")
+	})
+}
+
 // sharedS3, sharedFake back sharedTestS3: most tests below only care that
 // CRUD/hook/edge-case behavior works against *some* fake S3, not that each
 // gets its own client, so they share one client+fake (built once) instead of
-// each paying for their own New() (session + ping + struct validation).
+// each paying for their own New() (configuration + ping + struct validation).
 // Every caller uses its own key/bucket-path prefix, so sharing the fake's
 // object map is safe; sequential (non-parallel) subtests make sharing its
 // mutable status-override fields safe too, since every test that sets one
 // resets it via t.Cleanup.
 //
-// This also sidesteps a goroutine-lifecycle flakiness class under -race:
-// each aws-sdk-go v1 credentials fetch spawns a short-lived internal
-// singleflight goroutine, and New()'s validator.Validate() call right after
-// the ping is allocation-heavy; with ~15 independent New() calls in this
-// file, a prior test's not-yet-unwound singleflight goroutine occasionally
-// raced a later test's reused memory address. A single shared New() call
-// all but eliminates that window.
+// Sharing also avoids repeatedly constructing SDK clients and validating
+// storage state across the many small edge-case tests in this file.
 var (
 	sharedS3Once sync.Once
 	sharedS3Inst *S3
@@ -146,6 +225,48 @@ func TestNew_PingFailure(t *testing.T) {
 	str, err := New(ctx, fake.bucket, s3TestConfig(ts.URL, &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}))
 	require.Error(t, err)
 	assert.Nil(t, str)
+}
+
+func TestNew_CredentialFailure(t *testing.T) {
+	fake := newS3Fake("bucket-new-credentials")
+	cfg := s3TestConfig(s3PlaceholderEndpoint, fake.client())
+
+	var called atomic.Bool
+	cfg.Credentials = failingCredentialsProvider{called: &called}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	str, err := New(ctx, fake.bucket, cfg)
+	require.Error(t, err)
+	assert.Nil(t, str)
+	assert.True(t, called.Load(), "the configured credential provider was not called")
+}
+
+func TestNew_ConfigLoadFailure(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config")
+	require.NoError(t, os.WriteFile(
+		configPath,
+		[]byte("[default]\nrequest_checksum_calculation = invalid\n"),
+		0o600,
+	))
+
+	t.Setenv("AWS_CONFIG_FILE", configPath)
+	t.Setenv("AWS_SDK_LOAD_CONFIG", "1")
+
+	str, err := New(t.Context(), "bucket-new-config", nil)
+	require.Error(t, err)
+	assert.Nil(t, str)
+	assert.ErrorContains(t, err, "load AWS configuration")
+}
+
+func TestNew_RetriesRetryableFailure(t *testing.T) {
+	fake := newS3Fake("bucket-new-retry")
+	fake.headFailures = 1
+
+	str := newTestS3(t, fake)
+	require.NotNil(t, str)
+	assert.GreaterOrEqual(t, fake.requestCount(http.MethodHead), 2)
 }
 
 //////
@@ -230,6 +351,18 @@ func TestS3_GetClient(t *testing.T) {
 	str, _ := sharedTestS3(t)
 
 	assert.Same(t, str.Client, str.GetClient())
+	assert.NoError(t, str.Close())
+}
+
+func TestS3_ContextCancellation(t *testing.T) {
+	str, _ := sharedTestS3(t)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := str.Count(ctx, "", &count.Count{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 //////
@@ -667,6 +800,7 @@ func TestS3_Retrieve(t *testing.T) {
 
 	fake.put("k/ok.json", []byte(`{"id":"1","name":"alpha"}`))
 	fake.put("k/bad.json", []byte(`not-json`))
+	fake.put("k/zero.json", []byte{})
 
 	t.Run("empty-id", func(t *testing.T) {
 		var v sampleDoc
@@ -701,6 +835,15 @@ func TestS3_Retrieve(t *testing.T) {
 
 	t.Run("not-found-NoSuchKey", func(t *testing.T) {
 		var v sampleDoc
+
+		_, sdkErr := str.Client.GetObject(t.Context(), &awss3.GetObjectInput{
+			Bucket: aws.String(str.Bucket),
+			Key:    aws.String("k/missing.json"),
+		})
+		require.Error(t, sdkErr)
+
+		var noSuchKey *types.NoSuchKey
+		require.True(t, errors.As(sdkErr, &noSuchKey), "expected errors.As to match *types.NoSuchKey")
 
 		before := str.GetCounterRetrievedFailed().Value()
 
@@ -750,6 +893,20 @@ func TestS3_Retrieve(t *testing.T) {
 		err := str.Retrieve(t.Context(), "id", "k/bad.json", &v, &retrieve.Retrieve{})
 		require.Error(t, err)
 		assert.EqualValues(t, before+1, str.GetCounterRetrievedFailed().Value())
+	})
+
+	t.Run("zero-byte-object-is-not-missing", func(t *testing.T) {
+		var v sampleDoc
+
+		err := str.Retrieve(t.Context(), "id", "k/zero.json", &v, &retrieve.Retrieve{})
+		require.Error(t, err)
+
+		var noSuchKey *types.NoSuchKey
+		assert.False(t, errors.As(err, &noSuchKey))
+
+		cErr, ok := customerror.To(err)
+		require.True(t, ok)
+		assert.NotEqual(t, http.StatusNotFound, cErr.StatusCode)
 	})
 
 	t.Run("post-hook-error", func(t *testing.T) {

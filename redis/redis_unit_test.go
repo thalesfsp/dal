@@ -2,18 +2,23 @@ package redis
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thalesfsp/dal/v2/internal/shared"
-	"github.com/thalesfsp/dal/v2/storage"
+	"github.com/thalesfsp/customerror"
+	"github.com/thalesfsp/dal/v3/internal/shared"
+	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
+	"github.com/thalesfsp/params/v2/customsort"
 	"github.com/thalesfsp/params/v2/delete"
 	"github.com/thalesfsp/params/v2/list"
 	"github.com/thalesfsp/params/v2/retrieve"
@@ -38,8 +43,265 @@ func newOfflineStorage(t *testing.T) (*fakeRedis, *Redis) {
 	return f, str
 }
 
+type closeErrorConn struct {
+	net.Conn
+
+	err error
+}
+
+func (c *closeErrorConn) Close() error {
+	_ = c.Conn.Close()
+
+	return c.err
+}
+
 // errHookBoom is returned by failing test hooks.
 var errHookBoom = errors.New("hook boom")
+
+type redisBulkTestDocument struct {
+	Value string `json:"value"`
+}
+
+func redisBulkTestItems(count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for i := range items {
+		items[i] = storage.BulkItem{
+			ID:    fmt.Sprintf("bulk-item-%d", i),
+			Value: redisBulkTestDocument{Value: fmt.Sprintf("value-%d", i)},
+		}
+	}
+
+	return items
+}
+
+func TestRedisPrepareChunkErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	str := &Redis{}
+	prm := &create.Create{}
+	options, err := storage.NewOptions[*create.Create]()
+	require.NoError(t, err)
+	rejected := errors.New("Redis pre-hook rejected item")
+	options.PreHookFunc = func(
+		_ context.Context,
+		adapter storage.IStorage,
+		id string,
+		target string,
+		_ any,
+		gotPrm *create.Create,
+	) error {
+		assert.Same(t, str, adapter)
+		assert.Equal(t, "namespace", target)
+		assert.Same(t, prm, gotPrm)
+		if id == "reject" {
+			return rejected
+		}
+
+		return nil
+	}
+	chunk := []storage.Indexed[storage.BulkItem]{
+		{Index: 2, Item: storage.BulkItem{ID: "", Value: "missing"}},
+		{Index: 7, Item: storage.BulkItem{ID: "reject", Value: "rejected"}},
+		{Index: 12, Item: storage.BulkItem{ID: "unmarshalable", Value: make(chan int)}},
+		{Index: 19, Item: storage.BulkItem{ID: "accepted", Value: map[string]string{"value": "ok"}}},
+	}
+	result := storage.BulkResult{}
+
+	prepared, stoppedAt := str.redisPrepareChunk(
+		t.Context(),
+		"namespace",
+		chunk,
+		prm,
+		options,
+		&result,
+	)
+	assert.Equal(t, -1, stoppedAt)
+	require.Len(t, prepared, 1)
+	assert.Equal(t, 19, prepared[0].indexed.Index)
+	assert.Equal(t, []byte(`{"value":"ok"}`), prepared[0].value)
+	require.Len(t, result.Failures, 3)
+	assert.Equal(t, []int{2, 7, 12}, []int{
+		result.Failures[0].Index,
+		result.Failures[1].Index,
+		result.Failures[2].Index,
+	})
+	assert.Equal(t, "id required", result.Failures[0].Err.Error())
+	assert.ErrorIs(t, result.Failures[1].Err, rejected)
+	assert.Equal(
+		t,
+		"failed to "+"to marshal. Original Error: json: unsupported type: chan int",
+		result.Failures[2].Err.Error(),
+	)
+	var unsupportedType *json.UnsupportedTypeError
+	assert.ErrorAs(t, result.Failures[2].Err, &unsupportedType)
+	assert.Equal(t, reflect.TypeFor[chan int](), unsupportedType.Type)
+
+	canceledCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	canceledResult := storage.BulkResult{}
+	prepared, stoppedAt = str.redisPrepareChunk(
+		canceledCtx,
+		"namespace",
+		chunk[3:],
+		prm,
+		options,
+		&canceledResult,
+	)
+	assert.Empty(t, prepared)
+	assert.Equal(t, 0, stoppedAt)
+	assert.Empty(t, canceledResult.Failures)
+}
+
+func TestRedisOffline_BulkCreate(t *testing.T) {
+	t.Run("happy path crosses pipeline chunk limit and reads back", func(t *testing.T) {
+		_, str := newOfflineStorage(t)
+		items := redisBulkTestItems(redisBulkChunkLimit*2 + 5)
+
+		result, err := str.BulkCreate(t.Context(), "", items, nil)
+		require.NoError(t, err)
+		assert.True(t, result.AllSucceeded())
+		assert.False(t, result.Stopped)
+		require.Len(t, result.Succeeded, len(items))
+
+		for index, item := range items {
+			assert.Equal(t, index, result.Succeeded[index])
+
+			var got redisBulkTestDocument
+			require.NoError(t, str.Retrieve(t.Context(), item.ID, "", &got, nil))
+			assert.Equal(t, item.Value, got)
+		}
+	})
+
+	t.Run("empty input succeeds even with canceled context", func(t *testing.T) {
+		_, str := newOfflineStorage(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		result, err := str.BulkCreate(ctx, "", nil, nil)
+		require.NoError(t, err)
+		assert.Equal(t, storage.BulkResult{}, result)
+	})
+
+	t.Run("single item", func(t *testing.T) {
+		_, str := newOfflineStorage(t)
+		items := redisBulkTestItems(1)
+
+		result, err := str.BulkCreate(t.Context(), "", items, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []int{0}, result.Succeeded)
+
+		var got redisBulkTestDocument
+		require.NoError(t, str.Retrieve(t.Context(), items[0].ID, "", &got, nil))
+		assert.Equal(t, items[0].Value, got)
+	})
+
+	t.Run("per-command errors preserve original indices", func(t *testing.T) {
+		fake, str := newOfflineStorage(t)
+		items := redisBulkTestItems(redisBulkChunkLimit + 35)
+		fake.mu.Lock()
+		fake.rejectSetKeys[items[7].ID] = true
+		fake.rejectSetKeys[items[127].ID] = true
+		fake.mu.Unlock()
+
+		result, err := str.BulkCreate(t.Context(), "", items, nil)
+		require.Error(t, err)
+		require.Len(t, result.Failures, 2)
+		assert.Equal(t, 7, result.Failures[0].Index)
+		assert.Equal(t, 127, result.Failures[1].Index)
+		assert.False(t, result.Stopped)
+		assert.Len(t, result.Succeeded, len(items)-2)
+
+		for index, item := range items {
+			var got redisBulkTestDocument
+			retrieveErr := str.Retrieve(t.Context(), item.ID, "", &got, nil)
+			if index == 7 || index == 127 {
+				require.Error(t, retrieveErr, "failed item %d was written", index)
+
+				continue
+			}
+			require.NoError(t, retrieveErr, "successful item %d was not written", index)
+			assert.Equal(t, item.Value, got)
+		}
+	})
+
+	t.Run("context cancellation keeps completed pipeline chunk", func(t *testing.T) {
+		_, str := newOfflineStorage(t)
+		items := redisBulkTestItems(redisBulkChunkLimit + 5)
+		ctx, cancel := context.WithCancel(t.Context())
+		postHook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+			cancel()
+
+			return nil
+		}
+
+		result, err := str.BulkCreate(ctx, "", items, nil, storage.WithPostHook(postHook))
+		require.ErrorIs(t, err, context.Canceled)
+		assert.True(t, result.Stopped)
+		require.Len(t, result.Succeeded, redisBulkChunkLimit)
+		require.Len(t, result.Failures, 5)
+		for index := range redisBulkChunkLimit {
+			assert.Equal(t, index, result.Succeeded[index])
+			var got redisBulkTestDocument
+			require.NoError(t, str.Retrieve(t.Context(), items[index].ID, "", &got, nil))
+		}
+		for offset, failure := range result.Failures {
+			assert.Equal(t, redisBulkChunkLimit+offset, failure.Index)
+			assert.ErrorIs(t, failure.Err, context.Canceled)
+		}
+	})
+}
+
+func TestRedisOffline_Close(t *testing.T) {
+	t.Run("closes client and is idempotent", func(t *testing.T) {
+		_, str := newOfflineStorage(t)
+
+		require.NoError(t, str.Close())
+		require.NoError(t, str.Close())
+
+		_, err := str.Client.Ping(t.Context()).Result()
+		require.Error(t, err, "operation after Close must fail because client is closed")
+	})
+
+	t.Run("concurrent calls", func(t *testing.T) {
+		_, str := newOfflineStorage(t)
+
+		const callers = 8
+
+		errs := make(chan error, callers)
+		for range callers {
+			go func() {
+				errs <- str.Close()
+			}()
+		}
+
+		for range callers {
+			require.NoError(t, <-errs)
+		}
+	})
+
+	t.Run("propagates client close error once", func(t *testing.T) {
+		f := startFakeRedis(t)
+		closeErr := errors.New("redis connection close failed")
+		dialer := &net.Dialer{}
+		cfg := &Config{
+			Addr: f.Addr(),
+			Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				conn, err := dialer.DialContext(ctx, network, addr)
+				if err != nil {
+					return nil, err
+				}
+
+				return &closeErrorConn{Conn: conn, err: closeErr}, nil
+			},
+		}
+
+		str, err := New(t.Context(), cfg)
+		require.NoError(t, err)
+
+		require.ErrorIs(t, str.Close(), closeErr)
+		require.NoError(t, str.Close())
+	})
+}
 
 // Happy path: full CRUD round-trip, plus Count/List with glob patterns.
 func TestRedisOffline_CRUDRoundTrip(t *testing.T) {
@@ -80,15 +342,15 @@ func TestRedisOffline_CRUDRoundTrip(t *testing.T) {
 	assert.EqualValues(t, 0, c)
 
 	// List: glob match, and no match.
-	var keys ResponseListKeys
+	var docs ResponseList[shared.TestDataWithIDS]
 
-	require.NoError(t, str.List(ctx, "", &keys, &list.List{Search: "VF*"}))
-	assert.Equal(t, []string{shared.DocumentID}, keys.Keys)
+	require.NoError(t, str.List(ctx, "", &docs, &list.List{Search: "VF*"}))
+	assert.Equal(t, []shared.TestDataWithIDS{*shared.UpdatedTestDataID}, docs.Items)
 
-	var none ResponseListKeys
+	var none ResponseList[shared.TestDataWithIDS]
 
 	require.NoError(t, str.List(ctx, "", &none, &list.List{Search: "zzz*"}))
-	assert.Empty(t, none.Keys)
+	assert.Empty(t, none.Items)
 
 	// Delete, then the document must be gone.
 	require.NoError(t, str.Delete(ctx, id, "", &delete.Delete{}))
@@ -120,10 +382,10 @@ func TestRedisOffline_NilParams(t *testing.T) {
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, c)
 
-	var keys ResponseListKeys
+	var docs ResponseList[shared.TestDataS]
 
-	require.NoError(t, str.List(ctx, "", &keys, nil))
-	assert.Equal(t, []string{"nil-prm"}, keys.Keys)
+	require.NoError(t, str.List(ctx, "", &docs, nil))
+	assert.Equal(t, []shared.TestDataS{*shared.TestData}, docs.Items)
 
 	require.NoError(t, str.Update(ctx, "nil-prm", "", shared.UpdatedTestData, nil))
 	require.NoError(t, str.Delete(ctx, "nil-prm", "", nil))
@@ -149,26 +411,70 @@ func TestRedisOffline_EmptyID(t *testing.T) {
 	assert.Error(t, str.Delete(ctx, "", "", nil))
 }
 
-// Retrieve edge cases: missing key (404), empty payload (skips unmarshal) and
-// a corrupt payload (unmarshal error).
+// Retrieve distinguishes missing/empty values from valid empty documents and
+// malformed JSON.
 func TestRedisOffline_RetrieveEdgeCases(t *testing.T) {
 	ctx := t.Context()
 
 	f, str := newOfflineStorage(t)
 
 	f.seed(map[string]string{
-		"empty-doc": "",
-		"bad-doc":   "{not-json",
+		"empty-payload":  "",
+		"empty-document": `{}`,
+		"bad-document":   `{not-json`,
 	})
 
-	var got shared.TestDataS
+	var missingDestination shared.TestDataS
 
-	assert.Error(t, str.Retrieve(ctx, shared.DocumentIDInvalid, "", &got, nil), "missing key must fail")
+	missingErr := str.Retrieve(ctx, shared.DocumentIDInvalid, "", &missingDestination, nil)
+	require.Error(t, missingErr, "missing key must fail")
+	assert.True(t, customerror.IsHTTPStatus(missingErr, http.StatusNotFound))
 
-	require.NoError(t, str.Retrieve(ctx, "empty-doc", "", &got, nil), "empty payload must not fail")
-	assert.Empty(t, got.Name)
+	var missingCustomErr *customerror.CustomError
+	require.ErrorAs(t, missingErr, &missingCustomErr)
+	assert.Equal(t, http.StatusNotFound, missingCustomErr.StatusCode)
 
-	assert.Error(t, str.Retrieve(ctx, "bad-doc", "", &got, nil), "corrupt payload must fail")
+	var emptyDestination shared.TestDataS
+
+	emptyErr := str.Retrieve(ctx, "empty-payload", "", &emptyDestination, nil)
+	require.Error(t, emptyErr, "empty payload must return NotFound")
+	assert.True(t, customerror.IsHTTPStatus(emptyErr, http.StatusNotFound))
+
+	var emptyCustomErr *customerror.CustomError
+	require.ErrorAs(t, emptyErr, &emptyCustomErr)
+	assert.Equal(t, http.StatusNotFound, emptyCustomErr.StatusCode)
+
+	var emptyDocument *shared.TestDataS
+
+	require.NoError(t, str.Retrieve(ctx, "empty-document", "", &emptyDocument, nil))
+	require.NotNil(t, emptyDocument, "decoding {} must populate the destination")
+	assert.Equal(t, shared.TestDataS{}, *emptyDocument)
+
+	var malformedDestination shared.TestDataS
+
+	malformedErr := str.Retrieve(ctx, "bad-document", "", &malformedDestination, nil)
+	require.Error(t, malformedErr, "malformed JSON must fail")
+	assert.False(t, customerror.IsHTTPStatus(malformedErr, http.StatusNotFound))
+
+	var malformedCustomErr *customerror.CustomError
+	require.ErrorAs(t, malformedErr, &malformedCustomErr)
+	assert.NotEqual(t, missingCustomErr.StatusCode, malformedCustomErr.StatusCode,
+		"decode errors and NotFound errors must have different error classifications")
+
+	var malformedSyntaxErr *json.SyntaxError
+	require.ErrorAs(t, malformedErr, &malformedSyntaxErr)
+
+	var missingSyntaxErr *json.SyntaxError
+	assert.False(t, errors.As(missingErr, &missingSyntaxErr),
+		"NotFound and malformed JSON must wrap different error types")
+
+	id, err := str.Create(ctx, "populated-document", "", shared.TestData, nil)
+	require.NoError(t, err)
+
+	var populatedDestination shared.TestDataS
+
+	require.NoError(t, str.Retrieve(ctx, id, "", &populatedDestination, nil))
+	assert.Equal(t, *shared.TestData, populatedDestination)
 }
 
 // Unmarshalable documents make Create and Update fail before hitting Redis.
@@ -217,10 +523,170 @@ func TestRedisOffline_ScanPagination(t *testing.T) {
 	require.NoError(t, err)
 	assert.EqualValues(t, total, c)
 
-	var keys ResponseListKeys
+	var docs ResponseList[shared.TestDataS]
 
-	require.NoError(t, str.List(ctx, "", &keys, &list.List{Search: "bulk:*"}))
-	assert.Len(t, keys.Keys, total)
+	require.NoError(t, str.List(ctx, "", &docs, &list.List{Search: "bulk:*", Limit: total}))
+	assert.Len(t, docs.Items, total)
+}
+
+type redisListParamsDoc struct {
+	ID    string `json:"id"`
+	Group string `json:"group"`
+	Rank  int    `json:"rank"`
+	Drop  string `json:"drop"`
+}
+
+func TestRedisOffline_ListParams(t *testing.T) {
+	ctx := t.Context()
+	f, str := newOfflineStorage(t)
+
+	seed := make(map[string]string, 13)
+	for i := range 13 {
+		seed[fmt.Sprintf("params-%02d", i)] = fmt.Sprintf(
+			`{"id":"doc-%02d","group":"%s","rank":%d,"drop":"drop"}`,
+			i,
+			[]string{"b", "a"}[i%2],
+			i,
+		)
+	}
+	f.seed(seed)
+
+	listDocs := func(t *testing.T, prm *list.List) []redisListParamsDoc {
+		t.Helper()
+
+		var got ResponseList[redisListParamsDoc]
+		require.NoError(t, str.List(ctx, "", &got, prm))
+
+		return got.Items
+	}
+
+	t.Run("sort ascending and descending", func(t *testing.T) {
+		asc := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+		})
+		require.Len(t, asc, 10)
+		assert.Equal(t, 0, asc[0].Rank)
+		assert.Equal(t, 9, asc[9].Rank)
+
+		desc := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Desc}},
+		})
+		require.Len(t, desc, 10)
+		assert.Equal(t, 12, desc[0].Rank)
+		assert.Equal(t, 3, desc[9].Rank)
+	})
+
+	t.Run("literal sort params inherit default limit and agree with pre-hook", func(t *testing.T) {
+		var (
+			got       ResponseList[redisListParamsDoc]
+			hookLimit int
+		)
+
+		err := str.List(ctx, "", &got, &list.List{
+			Sort: customsort.SortSlice{{"rank", customsort.Asc}},
+		}, storage.WithPreHook(func(
+			_ context.Context,
+			_ storage.IStorage,
+			_, _ string,
+			_ any,
+			params *list.List,
+		) error {
+			hookLimit = params.Limit
+
+			return nil
+		}))
+		require.NoError(t, err)
+		require.Equal(t, 10, hookLimit)
+		require.Len(t, got.Items, hookLimit)
+	})
+
+	t.Run("multi-key sort breaks ties with second key", func(t *testing.T) {
+		got := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort: customsort.SortSlice{
+				{"group", customsort.Asc},
+				{"rank", customsort.Desc},
+			},
+		})
+		require.Len(t, got, 10)
+		assert.Equal(t, "a", got[0].Group)
+		assert.Equal(t, 11, got[0].Rank)
+		assert.Equal(t, 9, got[1].Rank)
+		assert.Equal(t, "b", got[6].Group)
+		assert.Equal(t, 12, got[6].Rank)
+	})
+
+	t.Run("offset alone", func(t *testing.T) {
+		assert.Len(t, listDocs(t, &list.List{Search: "params-*", Offset: 3}), 10)
+	})
+
+	t.Run("limit alone", func(t *testing.T) {
+		assert.Len(t, listDocs(t, &list.List{Search: "params-*", Limit: 4}), 4)
+	})
+
+	t.Run("offset and limit", func(t *testing.T) {
+		got := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+			Offset: 3,
+			Limit:  4,
+		})
+		require.Len(t, got, 4)
+		assert.Equal(t, []int{3, 4, 5, 6}, []int{got[0].Rank, got[1].Rank, got[2].Rank, got[3].Rank})
+	})
+
+	t.Run("fields projection", func(t *testing.T) {
+		var got ResponseList[map[string]any]
+		require.NoError(t, str.List(ctx, "", &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+			Fields: []string{"id"},
+		}))
+		require.Len(t, got.Items, 10)
+		assert.Equal(t, map[string]any{"id": "doc-00"}, got.Items[0])
+	})
+
+	t.Run("combined", func(t *testing.T) {
+		var got ResponseList[map[string]any]
+		require.NoError(t, str.List(ctx, "", &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Desc}},
+			Offset: 2,
+			Limit:  3,
+			Fields: []string{"id"},
+		}))
+		assert.Equal(t, []map[string]any{
+			{"id": "doc-10"},
+			{"id": "doc-09"},
+			{"id": "doc-08"},
+		}, got.Items)
+	})
+
+	t.Run("list.New default limits to ten", func(t *testing.T) {
+		prm, err := list.New()
+		require.NoError(t, err)
+		prm.Search = "params-*"
+
+		assert.Len(t, listDocs(t, prm), 10)
+	})
+
+	t.Run("nil params leave behavior unchanged", func(t *testing.T) {
+		assert.Len(t, listDocs(t, nil), 13)
+	})
+
+	t.Run("invalid sort order uses normal error path", func(t *testing.T) {
+		failedBefore := str.GetCounterListedFailed().Value()
+
+		var got ResponseList[redisListParamsDoc]
+		err := str.List(ctx, "", &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", "sideways"}},
+		})
+		require.Error(t, err)
+		assert.Equal(t, failedBefore+1, str.GetCounterListedFailed().Value())
+	})
 }
 
 // Options and hooks: invalid option, failing pre-hook, failing post-hook and
@@ -372,7 +838,7 @@ func TestRedisOffline_Hooks(t *testing.T) {
 	})
 
 	t.Run("list", func(t *testing.T) {
-		var keys ResponseListKeys
+		var keys ResponseList[shared.TestDataS]
 
 		err := str.List(ctx, "", &keys, nil, storage.WithPreHook[*list.List](nil))
 		assert.Error(t, err, "nil pre-hook option must fail")
@@ -457,7 +923,7 @@ func TestRedisOffline_ServerDown(t *testing.T) {
 	_, err = str.Count(ctx, "", nil)
 	assert.Error(t, err)
 
-	var keys ResponseListKeys
+	var keys ResponseList[shared.TestDataS]
 
 	assert.Error(t, str.List(ctx, "", &keys, nil))
 

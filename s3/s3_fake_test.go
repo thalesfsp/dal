@@ -1,17 +1,155 @@
 package s3
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"testing"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/stretchr/testify/require"
+	"github.com/thalesfsp/dal/v3/storage"
+	"github.com/thalesfsp/params/v2/create"
 )
+
+type s3BulkDocument struct {
+	Value string `json:"value"`
+}
+
+func s3BulkItems(count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for index := range items {
+		items[index] = storage.BulkItem{
+			ID:    fmt.Sprintf("bulk/item-%d.json", index),
+			Value: s3BulkDocument{Value: fmt.Sprintf("value-%d", index)},
+		}
+	}
+
+	return items
+}
+
+func TestS3BulkCreateHappyPathManyItems(t *testing.T) {
+	fake := newS3Fake("bulk-happy-bucket")
+	str := newTestS3(t, fake)
+	items := s3BulkItems(20)
+
+	result, err := str.BulkCreate(t.Context(), "unused", items, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(items), len(result.Succeeded))
+	require.Empty(t, result.Failures)
+	require.False(t, result.Stopped)
+
+	for index, item := range items {
+		require.Equal(t, index, result.Succeeded[index])
+
+		var got s3BulkDocument
+		require.NoError(t, str.Retrieve(t.Context(), item.ID, item.ID, &got, nil))
+		require.Equal(t, item.Value, got)
+	}
+}
+
+func TestS3BulkCreateEmptyInput(t *testing.T) {
+	fake := newS3Fake("bulk-empty-bucket")
+	str := newTestS3(t, fake)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	result, err := str.BulkCreate(ctx, "unused", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, storage.BulkResult{}, result)
+}
+
+func TestS3BulkCreateSingleItem(t *testing.T) {
+	fake := newS3Fake("bulk-single-bucket")
+	str := newTestS3(t, fake)
+	items := s3BulkItems(1)
+
+	result, err := str.BulkCreate(t.Context(), "unused", items, nil)
+	require.NoError(t, err)
+	require.Equal(t, []int{0}, result.Succeeded)
+
+	var got s3BulkDocument
+	require.NoError(t, str.Retrieve(t.Context(), items[0].ID, items[0].ID, &got, nil))
+	require.Equal(t, items[0].Value, got)
+}
+
+func TestS3BulkCreatePartialFailurePreservesOriginalIndices(t *testing.T) {
+	fake := newS3Fake("bulk-partial-bucket")
+	str := newTestS3(t, fake)
+	items := s3BulkItems(20)
+	rejected := errors.New("rejected by s3 bulk test")
+	preHook := func(_ context.Context, _ storage.IStorage, id, _ string, _ any, _ *create.Create) error {
+		if id == items[17].ID {
+			return rejected
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(t.Context(), "unused", items, nil, storage.WithPreHook(preHook))
+	require.Error(t, err)
+	require.False(t, result.Stopped)
+	require.Len(t, result.Failures, 1)
+	if failureIndices := []int{result.Failures[0].Index}; !reflect.DeepEqual(failureIndices, []int{17}) {
+		t.Fatalf("failure indices = %v, want [17]", failureIndices)
+	}
+	require.ErrorIs(t, result.Failures[0].Err, rejected)
+
+	for index, item := range items {
+		_, found := fake.get(item.ID)
+		if index == 17 {
+			require.False(t, found)
+
+			continue
+		}
+
+		require.True(t, found, "item %d", index)
+	}
+}
+
+func TestS3BulkCreateContextCancellationMidBatch(t *testing.T) {
+	fake := newS3Fake("bulk-cancel-bucket")
+	str := newTestS3(t, fake)
+	items := s3BulkItems(24)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	var completed atomic.Int32
+	postHook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+		if completed.Add(1) == 3 {
+			cancel()
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(ctx, "unused", items, nil, storage.WithPostHook(postHook))
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, result.Stopped)
+	require.NotEmpty(t, result.Succeeded)
+	require.Equal(t, len(items), len(result.Succeeded)+len(result.Failures))
+
+	succeeded := make(map[int]bool, len(result.Succeeded))
+	for _, index := range result.Succeeded {
+		succeeded[index] = true
+	}
+	for index, item := range items {
+		_, found := fake.get(item.ID)
+		require.Equal(t, found, succeeded[index], "persisted/report mismatch for item %d", index)
+	}
+	for _, failure := range result.Failures {
+		require.ErrorIs(t, failure.Err, context.Canceled)
+	}
+}
 
 //////
 // A minimal, offline, in-memory fake of the S3 REST API. It's deliberately
@@ -34,6 +172,7 @@ type s3Fake struct {
 
 	// Status overrides. Zero means "use the default successful status".
 	headStatus   int
+	headFailures int
 	putStatus    int
 	deleteStatus int
 	listStatus   int
@@ -208,6 +347,13 @@ func (f *s3Fake) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *s3Fake) handleHeadBucket(w http.ResponseWriter) {
+	if f.headFailures > 0 {
+		f.headFailures--
+		writeS3XMLError(w, http.StatusInternalServerError, "InternalError", "simulated retryable head failure")
+
+		return
+	}
+
 	if f.headStatus != 0 && f.headStatus != http.StatusOK {
 		w.WriteHeader(f.headStatus)
 
@@ -215,6 +361,20 @@ func (f *s3Fake) handleHeadBucket(w http.ResponseWriter) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func (f *s3Fake) requestCount(method string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	count := 0
+	for _, request := range f.requests {
+		if strings.HasPrefix(request, method+" ") {
+			count++
+		}
+	}
+
+	return count
 }
 
 func (f *s3Fake) handlePutObject(w http.ResponseWriter, r *http.Request, key string) {
@@ -356,11 +516,9 @@ func s3ListObjectsV2XML(keys []string, truncated bool, nextToken string) string 
 // doesn't actually hit the network, e.g. a *localTransport.
 func s3TestConfig(endpoint string, client *http.Client) *Config {
 	return &aws.Config{
-		Endpoint:         aws.String(endpoint),
-		Region:           aws.String("us-east-1"),
-		Credentials:      credentials.NewStaticCredentials("k", "s", ""),
-		S3ForcePathStyle: aws.Bool(true),
-		DisableSSL:       aws.Bool(true),
-		HTTPClient:       client,
+		BaseEndpoint: aws.String(endpoint),
+		Region:       "us-east-1",
+		Credentials:  credentials.NewStaticCredentialsProvider("k", "s", ""),
+		HTTPClient:   client,
 	}
 }

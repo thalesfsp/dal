@@ -1,12 +1,12 @@
 package dynamodb
 
 import (
+	"errors"
 	"net/http"
 	"regexp"
 	"testing"
 
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thalesfsp/customerror"
@@ -41,8 +41,11 @@ func TestBuildFilterExpression_HappyPath(t *testing.T) {
 	require.NotNil(t, expr)
 
 	assert.Equal(t, "(#name = :name)", *expr)
-	assert.Equal(t, "name", *names["#name"])
-	assert.Equal(t, "alpha", *values[":name"].S)
+	assert.Equal(t, "name", names["#name"])
+
+	name, ok := values[":name"].(*types.AttributeValueMemberS)
+	require.True(t, ok)
+	assert.Equal(t, "alpha", name.Value)
 }
 
 // Attribute names DynamoDB placeholders can't carry directly (dashes, dots)
@@ -59,7 +62,7 @@ func TestBuildFilterExpression_UnsafeAttributeNames(t *testing.T) {
 
 	for placeholder, original := range names {
 		assert.Regexp(t, `^#[A-Za-z0-9_]+$`, placeholder)
-		assert.Equal(t, "created-at", *original, "the real attribute name is carried in the names map")
+		assert.Equal(t, "created-at", original, "the real attribute name is carried in the names map")
 	}
 }
 
@@ -111,9 +114,12 @@ func TestBuildProjectionExpression(t *testing.T) {
 }
 
 func TestErrorHelpers(t *testing.T) {
-	notFound := awserr.New(dynamodb.ErrCodeResourceNotFoundException, "nope", nil)
-	condFailed := awserr.New(dynamodb.ErrCodeConditionalCheckFailedException, "cond", nil)
-	throughput := awserr.New(dynamodb.ErrCodeProvisionedThroughputExceededException, "slow", nil)
+	notFound := &types.ResourceNotFoundException{Message: ptr("nope")}
+	condFailed := &types.ConditionalCheckFailedException{Message: ptr("cond")}
+	throughput := &types.ProvisionedThroughputExceededException{Message: ptr("slow")}
+
+	var typedNotFound *types.ResourceNotFoundException
+	assert.True(t, errors.As(notFound, &typedNotFound))
 
 	assert.True(t, IsNotFoundError(notFound))
 	assert.False(t, IsNotFoundError(nil))
@@ -142,5 +148,35 @@ func TestMarshalRoundTrip(t *testing.T) {
 
 	key, err := MarshalKey("id", "1")
 	require.NoError(t, err)
-	assert.Equal(t, "1", *key["id"].S)
+
+	id, ok := key["id"].(*types.AttributeValueMemberS)
+	require.True(t, ok)
+	assert.Equal(t, "1", id.Value)
+}
+
+func TestUnmarshalItemsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	type row struct {
+		ID   string `dynamodbav:"id"`
+		Name string `dynamodbav:"name"`
+	}
+	want := []row{
+		{ID: "first", Name: "alpha"},
+		{ID: "second", Name: "beta"},
+	}
+	items := make([]map[string]types.AttributeValue, len(want))
+	for i := range want {
+		item, err := MarshalItem(want[i])
+		require.NoError(t, err)
+		items[i] = item
+	}
+
+	var got []row
+	require.NoError(t, UnmarshalItems(items, &got))
+	assert.Equal(t, want, got)
+}
+
+func ptr(value string) *string {
+	return &value
 }

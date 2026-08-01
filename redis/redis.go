@@ -10,10 +10,10 @@ import (
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/redis/go-redis/v9"
 	"github.com/thalesfsp/customerror"
-	"github.com/thalesfsp/dal/v2/internal/customapm"
-	"github.com/thalesfsp/dal/v2/internal/logging"
-	"github.com/thalesfsp/dal/v2/internal/shared"
-	"github.com/thalesfsp/dal/v2/storage"
+	"github.com/thalesfsp/dal/v3/internal/customapm"
+	"github.com/thalesfsp/dal/v3/internal/envelope"
+	"github.com/thalesfsp/dal/v3/internal/shared"
+	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/delete"
@@ -21,9 +21,6 @@ import (
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
 	"github.com/thalesfsp/status"
-	"github.com/thalesfsp/sypl/v2"
-	"github.com/thalesfsp/sypl/v2/fields"
-	"github.com/thalesfsp/sypl/v2/level"
 	"github.com/thalesfsp/validation"
 )
 
@@ -50,6 +47,8 @@ type Redis struct {
 	// Client is the Redis client.
 	Client *redis.Client `json:"-" validate:"required,structonly"`
 
+	closeOnce sync.Once
+
 	// Config is the Redis configuration.
 	// Skipped by the validator: it dives into untagged nested structs, and
 	// this config holds live client state that background goroutines write.
@@ -71,435 +70,182 @@ type Redis struct {
 
 // Count returns the number of items in the storage.
 func (r *Redis) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
-	//////
-	// APM Tracing.
-	//////
+	return envelope.Run[count.Count, int64](ctx, envelope.Config[count.Count]{
+		Storage:        r,
+		Adapter:        Name,
+		Status:         status.Counted.String(),
+		Target:         target,
+		Param:          prm,
+		Options:        options,
+		SuccessCounter: r.GetCounterCounted(),
+		FailureCounter: r.GetCounterCountedFailed(),
+		NewParams: func() (*count.Count, error) {
+			params, err := count.New()
+			if err == nil {
+				params.Search = "*"
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		r.GetType(),
-		Name,
-		status.Counted.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*count.Count]()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterCountedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return 0, customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterCountedFailed())
+			return params, err
+		},
+	}, func(ctx context.Context, params *count.Count) (envelope.Result[int64], error) {
+		pattern := params.Search
+		if pattern == "" {
+			pattern = "*"
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
+		var result int64
 
-	finalParam, err := count.New()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterCountedFailed())
-	}
+		iter := r.Client.Scan(ctx, 0, pattern, 0).Iterator()
 
-	// Application's default values.
-	finalParam.Search = "*"
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Count.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, r, "", target, nil, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterCountedFailed())
+		for iter.Next(ctx) {
+			result++
 		}
-	}
 
-	pattern := finalParam.Search
-	if pattern == "" {
-		pattern = "*"
-	}
-
-	// Count keys matching the pattern using SCAN — unlike KEYS it doesn't
-	// block the server on large keyspaces.
-	var count int64
-
-	iter := r.Client.Scan(ctx, 0, pattern, 0).Iterator()
-
-	for iter.Next(ctx) {
-		count++
-	}
-
-	if err := iter.Err(); err != nil {
-		return 0, customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
+		if err := iter.Err(); err != nil {
+			return envelope.Result[int64]{}, customerror.NewFailedToError(
 				storage.OperationCount.String(),
 				customerror.WithError(err),
-			),
-			r.GetLogger(),
-			r.GetCounterCountedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, r, "", target, count, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterCountedFailed())
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	r.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Counted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	r.GetCounterCounted().Add(1)
-
-	return count, nil
+		return envelope.Result[int64]{Value: result, PostHookData: result}, nil
+	})
 }
 
 // Delete removes data.
 func (r *Redis) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			r.GetLogger(),
-			r.GetCounterDeletedFailed(),
-		)
-	}
-
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		r.GetType(),
-		Name,
-		status.Deleted.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*delete.Delete]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterDeletedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterDeletedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := delete.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterDeletedFailed())
-	}
-
-	// Application's default values.
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Delete.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, r, id, target, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterDeletedFailed())
-		}
-	}
-
-	if err := r.Client.Del(ctx, id).Err(); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
+	_, err := envelope.Run[delete.Delete, envelope.Void](ctx, envelope.Config[delete.Delete]{
+		Storage:        r,
+		Adapter:        Name,
+		Status:         status.Deleted.String(),
+		ID:             id,
+		Target:         target,
+		Param:          prm,
+		Options:        options,
+		NewParams:      delete.New,
+		RequiresID:     true,
+		SuccessCounter: r.GetCounterDeleted(),
+		FailureCounter: r.GetCounterDeletedFailed(),
+	}, func(ctx context.Context, _ *delete.Delete) (envelope.Result[envelope.Void], error) {
+		if err := r.Client.Del(ctx, id).Err(); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
 				storage.OperationDelete.String(),
 				customerror.WithError(err),
-			),
-			r.GetLogger(),
-			r.GetCounterDeletedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, r, id, target, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterDeletedFailed())
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		return envelope.Result[envelope.Void]{}, nil
+	})
 
-	// Correlates the transaction, span and log, and logs it.
-	r.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Deleted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	r.GetCounterDeleted().Add(1)
-
-	return nil
+	return err
 }
 
 // Retrieve data.
 func (r *Redis) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			r.GetLogger(),
-			r.GetCounterRetrievedFailed(),
-		)
-	}
+	_, err := envelope.Run[retrieve.Retrieve, envelope.Void](ctx, envelope.Config[retrieve.Retrieve]{
+		Storage:        r,
+		Adapter:        Name,
+		Status:         status.Retrieved.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Param:          prm,
+		Options:        options,
+		NewParams:      retrieve.New,
+		RequiresID:     true,
+		SuccessCounter: r.GetCounterRetrieved(),
+		FailureCounter: r.GetCounterRetrievedFailed(),
+	}, func(ctx context.Context, _ *retrieve.Retrieve) (envelope.Result[envelope.Void], error) {
+		objStr, err := r.Client.Get(ctx, id).Result()
+		if err != nil {
+			if errors.Is(err, redis.Nil) {
+				return envelope.Result[envelope.Void]{}, customerror.NewHTTPError(http.StatusNotFound)
+			}
 
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		r.GetType(),
-		Name,
-		status.Retrieved.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*retrieve.Retrieve]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterRetrievedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterRetrievedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := retrieve.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterRetrievedFailed())
-	}
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Retrieve.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, r, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterRetrievedFailed())
-		}
-	}
-
-	objStr, err := r.Client.Get(ctx, id).Result()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewHTTPError(http.StatusNotFound),
-				r.GetLogger(),
-				r.GetCounterRetrievedFailed(),
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationRetrieve.String(),
+				customerror.WithError(err),
 			)
 		}
 
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationRetrieve.String(),
-				customerror.WithError(err),
-			),
-			r.GetLogger(),
-			r.GetCounterRetrievedFailed())
-	}
-
-	if objStr != "" {
-		b := []byte(objStr)
-		if err := shared.Unmarshal(b, v); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterRetrievedFailed())
+		if len(objStr) == 0 {
+			return envelope.Result[envelope.Void]{}, customerror.NewHTTPError(http.StatusNotFound)
 		}
-	}
 
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, r, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterRetrievedFailed())
+		if err := shared.Unmarshal([]byte(objStr), v); err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	// Correlates the transaction, span and log, and logs it.
-	r.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Retrieved.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	r.GetCounterRetrieved().Add(1)
-
-	return nil
+	return err
 }
 
 // List data.
 //
-// NOTE: It uses params.List.Search to query the data.
-//
-// NOTE: Redis does not support the concept of "offset" and "limit" in the same
-// way that a traditional SQL database does.
+// Search is a glob passed to SCAN. Sort, Limit, Offset, and Fields are applied
+// to the decoded values after matching.
 func (r *Redis) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[list.List, envelope.Void](ctx, envelope.Config[list.List]{
+		Storage:        r,
+		Adapter:        Name,
+		Status:         status.Listed.String(),
+		Target:         target,
+		HookData:       v,
+		Param:          prm,
+		Options:        options,
+		SuccessCounter: r.GetCounterListed(),
+		FailureCounter: r.GetCounterListedFailed(),
+		NewParams: func() (*list.List, error) {
+			params, err := list.New()
+			if err == nil {
+				params.Search = "*"
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		r.GetType(),
-		Name,
-		status.Listed.String(),
-	)
-	defer span.End()
+			return params, err
+		},
+	}, func(ctx context.Context, params *list.List) (envelope.Result[envelope.Void], error) {
+		iter := r.Client.Scan(ctx, 0, params.Search, 0).Iterator()
 
-	//////
-	// Options initialization.
-	//////
+		var docs [][]byte
 
-	o, err := storage.NewOptions[*list.List]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterListedFailed())
-	}
+		for iter.Next(ctx) {
+			doc, err := r.Client.Get(ctx, iter.Val()).Bytes()
+			if err != nil {
+				return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+					storage.OperationList.String(),
+					customerror.WithError(err),
+				)
+			}
 
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterListedFailed())
+			docs = append(docs, doc)
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := list.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterListedFailed())
-	}
-
-	// Application's default values.
-	finalParam.Search = "*"
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Query.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, r, "", target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterListedFailed())
-		}
-	}
-
-	iter := r.Client.Scan(ctx, 0, finalParam.Search, 0).Iterator()
-
-	keys := ResponseListKeys{[]string{}}
-
-	for iter.Next(ctx) {
-		keys.Keys = append(keys.Keys, iter.Val())
-	}
-
-	if err := iter.Err(); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationList.String(),
+		if err := iter.Err(); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationList.String(),
 				customerror.WithError(err),
-			),
-			r.GetLogger(), r.GetCounterListedFailed(),
-		)
-	}
-
-	if err := storage.ParseToStruct(keys, v); err != nil {
-		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterListedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, r, "", target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterListedFailed())
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		if prm == nil {
+			params = nil
+		}
 
-	// Correlates the transaction, span and log, and logs it.
-	r.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Listed.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
+		docs, err := shared.ApplyListParams(docs, params)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
 
-	//////
-	// Metrics.
-	//////
+		if err := shared.Unmarshal(shared.AssembleItems(docs), v); err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
 
-	r.GetCounterListed().Add(1)
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	return nil
+	return err
 }
 
 // Create data.
@@ -507,224 +253,100 @@ func (r *Redis) List(ctx context.Context, target string, v any, prm *list.List, 
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
 func (r *Redis) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
-	// The id is the storage key — an empty one would create a record that
-	// Retrieve/Delete/Update (which reject empty ids) could never address.
-	if id == "" {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			r.GetLogger(),
-			r.GetCounterCreatedFailed(),
-		)
-	}
+	return envelope.Run[create.Create, string](ctx, envelope.Config[create.Create]{
+		Storage:        r,
+		Adapter:        Name,
+		Status:         status.Created.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Param:          prm,
+		Options:        options,
+		RequiresID:     true,
+		SuccessCounter: r.GetCounterCreated(),
+		FailureCounter: r.GetCounterCreatedFailed(),
+		NewParams: func() (*create.Create, error) {
+			params, err := create.New()
+			if err == nil {
+				params.TTL = 0
+			}
 
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		r.GetType(),
-		Name,
-		status.Created.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*create.Create]()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterCreatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return "", customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterCreatedFailed())
+			return params, err
+		},
+	}, func(ctx context.Context, params *create.Create) (envelope.Result[string], error) {
+		b, err := shared.Marshal(v)
+		if err != nil {
+			return envelope.Result[string]{}, err
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := create.New()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterCreatedFailed())
-	}
-
-	finalParam.TTL = 0
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Create.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, r, id, target, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterCreatedFailed())
-		}
-	}
-
-	b, err := shared.Marshal(v)
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterCreatedFailed())
-	}
-
-	if err := r.Client.Set(ctx, id, b, finalParam.TTL).Err(); err != nil {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
+		if err := r.Client.Set(ctx, id, b, params.TTL).Err(); err != nil {
+			return envelope.Result[string]{}, customerror.NewFailedToError(
 				storage.OperationCreate.String(),
 				customerror.WithError(err),
-			),
-			r.GetLogger(),
-			r.GetCounterCreatedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, r, id, target, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterCreatedFailed())
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	r.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Created.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	r.GetCounterCreated().Add(1)
-
-	return id, nil
+		return envelope.Result[string]{Value: id, PostHookData: v}, nil
+	})
 }
 
 // Update data.
 //
 // NOTE: Not truly an update, it's an insert.
 func (r *Redis) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			r.GetLogger(),
-			r.GetCounterUpdatedFailed(),
-		)
-	}
+	_, err := envelope.Run[update.Update, envelope.Void](ctx, envelope.Config[update.Update]{
+		Storage:        r,
+		Adapter:        Name,
+		Status:         status.Updated.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Param:          prm,
+		Options:        options,
+		RequiresID:     true,
+		SuccessCounter: r.GetCounterUpdated(),
+		FailureCounter: r.GetCounterUpdatedFailed(),
+		NewParams: func() (*update.Update, error) {
+			params, err := update.New()
+			if err == nil {
+				params.TTL = 0
+			}
 
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		r.GetType(),
-		Name,
-		status.Updated.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*update.Update]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterUpdatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterUpdatedFailed())
+			return params, err
+		},
+	}, func(ctx context.Context, params *update.Update) (envelope.Result[envelope.Void], error) {
+		b, err := shared.Marshal(v)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := update.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterUpdatedFailed())
-	}
-
-	finalParam.TTL = 0
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Update.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, r, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterUpdatedFailed())
-		}
-	}
-
-	b, err := shared.Marshal(v)
-	if err != nil {
-		return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterUpdatedFailed())
-	}
-
-	if err := r.Client.Set(ctx, id, b, finalParam.TTL).Err(); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationUpdate.String(),
+		if err := r.Client.Set(ctx, id, b, params.TTL).Err(); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationUpdate.String(),
 				customerror.WithError(err),
-			),
-			r.GetLogger(),
-			r.GetCounterUpdatedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, r, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, r.GetLogger(), r.GetCounterUpdatedFailed())
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	// Correlates the transaction, span and log, and logs it.
-	r.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Updated.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	r.GetCounterUpdated().Add(1)
-
-	return nil
+	return err
 }
 
 // GetClient returns the client.
 func (r *Redis) GetClient() any {
 	return r.Client
+}
+
+// Close releases the resources held by the storage.
+func (r *Redis) Close() error {
+	var closeErr error
+
+	r.closeOnce.Do(func() {
+		closeErr = r.Client.Close()
+	})
+
+	return closeErr
 }
 
 //////

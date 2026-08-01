@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thalesfsp/dal/v2/internal/shared"
+	"github.com/thalesfsp/dal/v3/internal/shared"
 )
 
 // The constructor `New` opens a *sqlx.DB with sqlx.Open (which does not

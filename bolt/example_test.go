@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 
-	"github.com/thalesfsp/dal/v2/bolt"
+	"github.com/thalesfsp/dal/v3/bolt"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
+	"github.com/thalesfsp/params/v2/customsort"
 	"github.com/thalesfsp/params/v2/delete"
 	"github.com/thalesfsp/params/v2/list"
 	"github.com/thalesfsp/params/v2/retrieve"
@@ -71,9 +71,8 @@ func Example_createAndRetrieve() {
 	// Output: Ada
 }
 
-// Example_list filters a bucket's keys with a glob Search pattern. Matches
-// come back in bbolt's cursor order (lexicographic by key); they're sorted
-// here anyway so the example stays correct even if that ever changes.
+// Example_list filters a bucket's keys with a glob Search pattern and uses
+// Sort to make the result order explicit.
 func Example_list() {
 	ctx := context.Background()
 
@@ -87,7 +86,10 @@ func Example_list() {
 	}
 
 	var out bolt.ResponseList[user]
-	if err := str.List(ctx, "records", &out, &list.List{Search: "user-*"}); err != nil {
+	if err := str.List(ctx, "records", &out, &list.List{
+		Search: "user-*",
+		Sort:   customsort.SortSlice{{"name", customsort.Asc}},
+	}); err != nil {
 		panic(err)
 	}
 
@@ -95,8 +97,6 @@ func Example_list() {
 	for _, item := range out.Items {
 		names = append(names, item.Name)
 	}
-
-	sort.Strings(names)
 
 	fmt.Println(names)
 	// Output: [user-1 user-2]

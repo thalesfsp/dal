@@ -52,9 +52,6 @@ linters:
       - std-error-handling
     rules:
       - linters:
-          - staticcheck
-        text: 'SA1019: .*aws-sdk-go is deprecated'
-      - linters:
           - exhaustivestruct
           - exhaustruct
           - forbidigo
@@ -75,9 +72,6 @@ linters:
           - nlreturn
           - unparam
         path: http/
-      - linters:
-          - govet
-        path: mongo*
       - linters:
           - cyclop
           - testpackage

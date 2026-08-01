@@ -7,10 +7,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
-	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/thalesfsp/customerror"
 )
 
@@ -62,10 +61,9 @@ func IsNotFoundError(err error) bool {
 		return false
 	}
 
-	// Check for AWS specific error
-	var awsErr awserr.Error
-	if errors.As(err, &awsErr) {
-		return awsErr.Code() == dynamodb.ErrCodeResourceNotFoundException
+	var notFound *types.ResourceNotFoundException
+	if errors.As(err, &notFound) {
+		return true
 	}
 
 	// Check if it's a customerror not found type
@@ -78,29 +76,23 @@ func IsNotFoundError(err error) bool {
 
 // IsConditionalCheckFailedError checks if the error is a conditional check failed error.
 func IsConditionalCheckFailedError(err error) bool {
-	var awsErr awserr.Error
-	if errors.As(err, &awsErr) {
-		return awsErr.Code() == dynamodb.ErrCodeConditionalCheckFailedException
-	}
+	var conditionalCheckFailed *types.ConditionalCheckFailedException
 
-	return false
+	return errors.As(err, &conditionalCheckFailed)
 }
 
 // IsProvisionedThroughputExceededError checks if the error is a throughput exceeded error.
 func IsProvisionedThroughputExceededError(err error) bool {
-	var awsErr awserr.Error
-	if errors.As(err, &awsErr) {
-		return awsErr.Code() == dynamodb.ErrCodeProvisionedThroughputExceededException
-	}
+	var throughputExceeded *types.ProvisionedThroughputExceededException
 
-	return false
+	return errors.As(err, &throughputExceeded)
 }
 
 // BuildFilterExpression builds a DynamoDB filter expression from a map of conditions.
 func BuildFilterExpression(conditions map[string]any) (
 	*string,
-	map[string]*string,
-	map[string]*dynamodb.AttributeValue,
+	map[string]string,
+	map[string]types.AttributeValue,
 	error,
 ) {
 	if len(conditions) == 0 {
@@ -108,8 +100,8 @@ func BuildFilterExpression(conditions map[string]any) (
 	}
 
 	expressions := make([]string, 0, len(conditions))
-	attributeNames := make(map[string]*string)
-	attributeValues := make(map[string]*dynamodb.AttributeValue)
+	attributeNames := make(map[string]string)
+	attributeValues := make(map[string]types.AttributeValue)
 
 	for key, value := range conditions {
 		placeholder := sanitizePlaceholder(key)
@@ -118,9 +110,9 @@ func BuildFilterExpression(conditions map[string]any) (
 		attrValue := fmt.Sprintf(":%s", placeholder)
 
 		expressions = append(expressions, fmt.Sprintf("%s = %s", attrName, attrValue))
-		attributeNames[attrName] = aws.String(key)
+		attributeNames[attrName] = key
 
-		av, err := dynamodbattribute.Marshal(value)
+		av, err := attributevalue.Marshal(value)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to marshal value for key %s: %w", key, err)
 		}
@@ -142,8 +134,8 @@ func BuildFilterExpression(conditions map[string]any) (
 // BuildUpdateExpression builds a DynamoDB update expression from a map of fields to update.
 func BuildUpdateExpression(updates map[string]any, primaryKey string) (
 	*string,
-	map[string]*string,
-	map[string]*dynamodb.AttributeValue,
+	map[string]string,
+	map[string]types.AttributeValue,
 	error,
 ) {
 	if len(updates) == 0 {
@@ -151,8 +143,8 @@ func BuildUpdateExpression(updates map[string]any, primaryKey string) (
 	}
 
 	setExpressions := make([]string, 0, len(updates))
-	attributeNames := make(map[string]*string)
-	attributeValues := make(map[string]*dynamodb.AttributeValue)
+	attributeNames := make(map[string]string)
+	attributeValues := make(map[string]types.AttributeValue)
 
 	for key, value := range updates {
 		// Skip the primary key in updates
@@ -166,9 +158,9 @@ func BuildUpdateExpression(updates map[string]any, primaryKey string) (
 		attrValue := fmt.Sprintf(":%s", placeholder)
 
 		setExpressions = append(setExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
-		attributeNames[attrName] = aws.String(key)
+		attributeNames[attrName] = key
 
-		av, err := dynamodbattribute.Marshal(value)
+		av, err := attributevalue.Marshal(value)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to marshal value for key %s: %w", key, err)
 		}
@@ -188,18 +180,18 @@ func BuildUpdateExpression(updates map[string]any, primaryKey string) (
 }
 
 // BuildProjectionExpression builds a DynamoDB projection expression from a slice of field names.
-func BuildProjectionExpression(fields []string) (*string, map[string]*string) {
+func BuildProjectionExpression(fields []string) (*string, map[string]string) {
 	if len(fields) == 0 {
 		return nil, nil
 	}
 
-	attributeNames := make(map[string]*string)
+	attributeNames := make(map[string]string)
 	projections := make([]string, 0, len(fields))
 
 	for _, field := range fields {
 		attrName := fmt.Sprintf("#%s", sanitizePlaceholder(field))
 		projections = append(projections, attrName)
-		attributeNames[attrName] = aws.String(field)
+		attributeNames[attrName] = field
 	}
 
 	expression := projections[0]
@@ -211,28 +203,28 @@ func BuildProjectionExpression(fields []string) (*string, map[string]*string) {
 }
 
 // MarshalItem marshals a Go value to a DynamoDB item.
-func MarshalItem(v any) (map[string]*dynamodb.AttributeValue, error) {
-	return dynamodbattribute.MarshalMap(v)
+func MarshalItem(v any) (map[string]types.AttributeValue, error) {
+	return attributevalue.MarshalMap(v)
 }
 
 // UnmarshalItem unmarshals a DynamoDB item to a Go value.
-func UnmarshalItem(item map[string]*dynamodb.AttributeValue, v any) error {
-	return dynamodbattribute.UnmarshalMap(item, v)
+func UnmarshalItem(item map[string]types.AttributeValue, v any) error {
+	return attributevalue.UnmarshalMap(item, v)
 }
 
 // UnmarshalItems unmarshals a slice of DynamoDB items to a slice of Go values.
-func UnmarshalItems(items []map[string]*dynamodb.AttributeValue, v any) error {
-	return dynamodbattribute.UnmarshalListOfMaps(items, v)
+func UnmarshalItems(items []map[string]types.AttributeValue, v any) error {
+	return attributevalue.UnmarshalListOfMaps(items, v)
 }
 
 // MarshalKey marshals a key value for DynamoDB operations.
-func MarshalKey(keyName string, keyValue any) (map[string]*dynamodb.AttributeValue, error) {
-	av, err := dynamodbattribute.Marshal(keyValue)
+func MarshalKey(keyName string, keyValue any) (map[string]types.AttributeValue, error) {
+	av, err := attributevalue.Marshal(keyValue)
 	if err != nil {
 		return nil, err
 	}
 
-	return map[string]*dynamodb.AttributeValue{
+	return map[string]types.AttributeValue{
 		keyName: av,
 	}, nil
 }

@@ -16,10 +16,10 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 	"github.com/thalesfsp/customerror"
-	"github.com/thalesfsp/dal/v2/internal/customapm"
-	"github.com/thalesfsp/dal/v2/internal/logging"
-	"github.com/thalesfsp/dal/v2/internal/shared"
-	"github.com/thalesfsp/dal/v2/storage"
+	"github.com/thalesfsp/dal/v3/internal/customapm"
+	"github.com/thalesfsp/dal/v3/internal/envelope"
+	"github.com/thalesfsp/dal/v3/internal/shared"
+	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/customsort"
@@ -28,9 +28,6 @@ import (
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
 	"github.com/thalesfsp/status"
-	"github.com/thalesfsp/sypl/v2"
-	"github.com/thalesfsp/sypl/v2/fields"
-	"github.com/thalesfsp/sypl/v2/level"
 	"github.com/thalesfsp/validation"
 )
 
@@ -69,6 +66,8 @@ type Postgres struct {
 
 	// Config is the postgres configuration.
 	Config *Config `json:"-"`
+
+	closeOnce sync.Once
 
 	// Target allows to set a static target. If it is empty, the target will be
 	// dynamic - the one set at the operation (count, create, delete, etc) time.
@@ -147,474 +146,204 @@ func (p *Postgres) createTable(ctx context.Context, name, description string) er
 
 // Count returns the number of items in the storage.
 func (p *Postgres) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
-	//////
-	// APM Tracing.
-	//////
+	var trgt string
 
-	ctx, span := customapm.Trace(
-		ctx,
-		p.GetType(),
-		Name,
-		status.Counted.String(),
-	)
-	defer span.End()
+	return envelope.Run[count.Count, int64](ctx, envelope.Config[count.Count]{
+		Storage: p,
+		Adapter: Name,
+		Status:  status.Counted.String(),
+		ResolveTarget: func() (string, error) {
+			var err error
 
-	//////
-	// Options initialization.
-	//////
+			trgt, err = shared.TargetName(target, p.Target)
+			if err == nil && (prm == nil || prm.Search == "") {
+				err = shared.ValidateSQLIdentifier(trgt)
+			}
 
-	o, err := storage.NewOptions[*count.Count]()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCountedFailed())
-	}
+			return trgt, err
+		},
+		Param:   prm,
+		Options: options,
+		NewParams: func() (*count.Count, error) {
+			params, err := count.New()
+			if err == nil {
+				defaultTarget := target
+				if defaultTarget == "" {
+					defaultTarget = p.Target
+				}
 
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return 0, customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCountedFailed())
-		}
-	}
+				params.Search = "SELECT COUNT(*) FROM " + defaultTarget
+			}
 
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, p.Target)
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCountedFailed())
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := count.New()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCountedFailed())
-	}
-
-	// Honor a caller-provided Search; only default when none was supplied.
-	// Copy prm so defaulting never mutates the caller-owned params struct.
-	if prm != nil {
-		prmCopy := *prm
-		finalParam = &prmCopy
-	}
-
-	if finalParam.Search == "" {
-		// trgt is interpolated into the statement — reject anything that
-		// isn't a plain identifier (SQL injection guard).
-		if err := shared.ValidateSQLIdentifier(trgt); err != nil {
-			return 0, customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCountedFailed())
+			return params, err
+		},
+		SuccessCounter: p.GetCounterCounted(),
+		FailureCounter: p.GetCounterCountedFailed(),
+	}, func(ctx context.Context, params *count.Count) (envelope.Result[int64], error) {
+		var result int64
+		if err := p.Client.QueryRowContext(ctx, params.Search).Scan(&result); err != nil {
+			return envelope.Result[int64]{}, customerror.NewFailedToError(
+				storage.OperationCount.String(),
+				customerror.WithError(err),
+			)
 		}
 
-		finalParam.Search = "SELECT COUNT(*) FROM " + trgt
-	}
-
-	//////
-	// Count.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, p, "", trgt, nil, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCountedFailed())
-		}
-	}
-
-	var count int64
-	if err = p.Client.QueryRowContext(ctx, finalParam.Search).Scan(&count); err != nil {
-		return 0, customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCount.String(), customerror.WithError(err)),
-			p.GetLogger(),
-			p.GetCounterCountedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, p, "", trgt, count, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCountedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	p.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Counted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	p.GetCounterCounted().Add(1)
-
-	return count, nil
+		return envelope.Result[int64]{Value: result, PostHookData: result}, nil
+	})
 }
 
 // Delete removes data.
 func (p *Postgres) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			p.GetLogger(),
-			p.GetCounterDeletedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[delete.Delete, envelope.Void](ctx, envelope.Config[delete.Delete]{
+		Storage: p,
+		Adapter: Name,
+		Status:  status.Deleted.String(),
+		ID:      id,
+		ResolveTarget: func() (string, error) {
+			var err error
 
-	ctx, span := customapm.Trace(
-		ctx,
-		p.GetType(),
-		Name,
-		status.Deleted.String(),
-	)
-	defer span.End()
+			trgt, err = shared.TargetName(target, p.Target)
 
-	//////
-	// Options initialization.
-	//////
+			return trgt, err
+		},
+		Param:          prm,
+		Options:        options,
+		NewParams:      delete.New,
+		RequiresID:     true,
+		SuccessCounter: p.GetCounterDeleted(),
+		FailureCounter: p.GetCounterDeletedFailed(),
+	}, func(ctx context.Context, _ *delete.Delete) (envelope.Result[envelope.Void], error) {
+		ds := goqu.Dialect(Name).Delete(trgt).Where(goqu.C("id").Eq(id))
 
-	o, err := storage.NewOptions[*delete.Delete]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterDeletedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterDeletedFailed())
+		// Convert the query to SQL, and arguments.
+		selectSQL, args, err := ds.ToSQL()
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationDelete.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := delete.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterDeletedFailed())
-	}
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, p.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterDeletedFailed())
-	}
-
-	//////
-	// Delete.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, p, id, trgt, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterDeletedFailed())
+		if _, err := p.Client.ExecContext(ctx, selectSQL, args...); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationDelete.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	ds := goqu.Dialect(Name).Delete(trgt).Where(goqu.C("id").Eq(id))
+		return envelope.Result[envelope.Void]{}, nil
+	})
 
-	// Convert the query to SQL, and arguments.
-	selectSQL, args, err := ds.ToSQL()
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationDelete.String(), customerror.WithError(err)),
-			p.GetLogger(),
-			p.GetCounterDeletedFailed(),
-		)
-	}
-
-	if _, err := p.Client.ExecContext(ctx, selectSQL, args...); err != nil { //nolint:gosec // goqu quotes the table identifier and parameterizes all values in selectSQL.
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationDelete.String(), customerror.WithError(err)),
-			p.GetLogger(),
-			p.GetCounterDeletedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, p, id, trgt, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterDeletedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	p.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Deleted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	p.GetCounterDeleted().Add(1)
-
-	return nil
+	return err
 }
 
 // Retrieve data.
 func (p *Postgres) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			p.GetLogger(),
-			p.GetCounterRetrievedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[retrieve.Retrieve, envelope.Void](ctx, envelope.Config[retrieve.Retrieve]{
+		Storage:  p,
+		Adapter:  Name,
+		Status:   status.Retrieved.String(),
+		ID:       id,
+		HookData: v,
+		ResolveTarget: func() (string, error) {
+			var err error
 
-	ctx, span := customapm.Trace(
-		ctx,
-		p.GetType(),
-		Name,
-		status.Retrieved.String(),
-	)
-	defer span.End()
+			trgt, err = shared.TargetName(target, p.Target)
 
-	//////
-	// Options initialization.
-	//////
+			return trgt, err
+		},
+		Param:          prm,
+		Options:        options,
+		NewParams:      retrieve.New,
+		RequiresID:     true,
+		SuccessCounter: p.GetCounterRetrieved(),
+		FailureCounter: p.GetCounterRetrievedFailed(),
+	}, func(ctx context.Context, _ *retrieve.Retrieve) (envelope.Result[envelope.Void], error) {
+		// Build the statement.
+		ds := goqu.Dialect(Name).From(trgt).Where(goqu.C("id").Eq(id))
 
-	o, err := storage.NewOptions[*retrieve.Retrieve]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterRetrievedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterRetrievedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := retrieve.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterRetrievedFailed())
-	}
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, p.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterRetrievedFailed())
-	}
-
-	//////
-	// Retrieve.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, p, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterRetrievedFailed())
-		}
-	}
-
-	// Build the statement.
-	ds := goqu.Dialect(Name).From(trgt).Where(goqu.C("id").Eq(id))
-
-	// Convert the query to SQL, and arguments.
-	selectSQL, args, err := ds.ToSQL()
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationRetrieve.String(), customerror.WithError(err)),
-			p.GetLogger(),
-			p.GetCounterRetrievedFailed(),
-		)
-	}
-
-	// Execute the query.
-	if err := p.Client.GetContext(ctx, v, selectSQL, args...); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewHTTPError(http.StatusNotFound),
-				p.GetLogger(),
-				p.GetCounterRetrievedFailed(),
+		// Convert the query to SQL, and arguments.
+		selectSQL, args, err := ds.ToSQL()
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationRetrieve.String(),
+				customerror.WithError(err),
 			)
 		}
 
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationRetrieve.String(), customerror.WithError(err)),
-			p.GetLogger(),
-			p.GetCounterRetrievedFailed(),
-		)
-	}
+		// Execute the query.
+		if err := p.Client.GetContext(ctx, v, selectSQL, args...); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return envelope.Result[envelope.Void]{}, customerror.NewHTTPError(http.StatusNotFound)
+			}
 
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, p, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterRetrievedFailed())
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationRetrieve.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	// Correlates the transaction, span and log, and logs it.
-	p.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Retrieved.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	p.GetCounterRetrieved().Add(1)
-
-	return nil
+	return err
 }
 
 // List data.
 //
-// NOTE: It uses param.List.Search to query the data.
+// Search is executed as the SQL query. Sort, Limit, Offset, and Fields are not
+// translated into SQL; include them in Search when needed.
 func (p *Postgres) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
-	//////
-	// APM Tracing.
-	//////
+	var trgt string
 
-	ctx, span := customapm.Trace(
-		ctx,
-		p.GetType(),
-		Name,
-		status.Listed.String(),
-	)
-	defer span.End()
+	_, err := envelope.Run[list.List, envelope.Void](ctx, envelope.Config[list.List]{
+		Storage:  p,
+		Adapter:  Name,
+		Status:   status.Listed.String(),
+		HookData: v,
+		ResolveTarget: func() (string, error) {
+			var err error
 
-	//////
-	// Options initialization.
-	//////
+			trgt, err = shared.TargetName(target, p.Target)
+			if err == nil && (prm == nil || prm.Search == "") {
+				err = shared.ValidateSQLIdentifier(trgt)
+			}
 
-	o, err := storage.NewOptions[*list.List]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
-	}
+			return trgt, err
+		},
+		Param:   prm,
+		Options: options,
+		NewParams: func() (*list.List, error) {
+			params, err := list.New()
+			if err == nil {
+				defaultTarget := target
+				if defaultTarget == "" {
+					defaultTarget = p.Target
+				}
 
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
-		}
-	}
+				params.Search = "SELECT * FROM " + defaultTarget
+			}
 
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, p.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := list.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
-	}
-
-	// Honor a caller-provided Search; only default when none was supplied.
-	// Copy prm so defaulting never mutates the caller-owned params struct.
-	if prm != nil {
-		prmCopy := *prm
-		finalParam = &prmCopy
-	}
-
-	if finalParam.Search == "" {
-		// trgt is interpolated into the statement — reject anything that
-		// isn't a plain identifier (SQL injection guard).
-		if err := shared.ValidateSQLIdentifier(trgt); err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
+			return params, err
+		},
+		SuccessCounter: p.GetCounterListed(),
+		FailureCounter: p.GetCounterListedFailed(),
+	}, func(ctx context.Context, params *list.List) (envelope.Result[envelope.Void], error) {
+		if err := p.Client.SelectContext(ctx, v, params.Search); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationList.String(),
+				customerror.WithError(err),
+			)
 		}
 
-		finalParam.Search = "SELECT * FROM " + trgt
-	}
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	//////
-	// List.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, p, "", trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
-		}
-	}
-
-	if err := p.Client.SelectContext(ctx, v, finalParam.Search); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationList.String(), customerror.WithError(err)),
-			p.GetLogger(),
-			p.GetCounterListedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, p, "", trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterListedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	p.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Listed.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	p.GetCounterListed().Add(1)
-
-	return nil
+	return err
 }
 
 // Create data.
@@ -622,254 +351,124 @@ func (p *Postgres) List(ctx context.Context, target string, v any, prm *list.Lis
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
 func (p *Postgres) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
-	//////
-	// APM Tracing.
-	//////
+	var trgt string
 
-	ctx, span := customapm.Trace(
-		ctx,
-		p.GetType(),
-		Name,
-		status.Created.String(),
-	)
-	defer span.End()
+	return envelope.Run[create.Create, string](ctx, envelope.Config[create.Create]{
+		Storage:  p,
+		Adapter:  Name,
+		Status:   status.Created.String(),
+		ID:       id,
+		HookData: v,
+		ResolveTarget: func() (string, error) {
+			var err error
 
-	//////
-	// Options initialization.
-	//////
+			trgt, err = shared.TargetName(target, p.Target)
 
-	o, err := storage.NewOptions[*create.Create]()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCreatedFailed())
-	}
+			return trgt, err
+		},
+		Param:          prm,
+		Options:        options,
+		NewParams:      create.New,
+		SuccessCounter: p.GetCounterCreated(),
+		FailureCounter: p.GetCounterCreatedFailed(),
+	}, func(ctx context.Context, _ *create.Create) (envelope.Result[string], error) {
+		// Build the statement.
+		ds := goqu.Dialect(Name).
+			Insert(trgt).
+			Rows(v).
+			Returning("id")
 
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return "", customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCreatedFailed())
+		// Convert the query to SQL, and arguments.
+		insertSQL, args, err := ds.ToSQL()
+		if err != nil {
+			return envelope.Result[string]{}, customerror.NewFailedToError(
+				storage.OperationCreate.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := create.New()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCreatedFailed())
-	}
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, p.Target)
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCreatedFailed())
-	}
-
-	//////
-	// Create.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, p, id, trgt, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCreatedFailed())
+		// Execute the query.
+		var returnedID string
+		if err := p.Client.QueryRowContext(ctx, insertSQL, args...).Scan(&returnedID); err != nil {
+			return envelope.Result[string]{}, customerror.NewFailedToError(
+				storage.OperationCreate.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	// Build the statement.
-	ds := goqu.Dialect(Name).
-		Insert(trgt).
-		Rows(v).
-		Returning("id")
-
-	// Convert the query to SQL, and arguments.
-	insertSQL, args, err := ds.ToSQL()
-	if err != nil {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
-			p.GetLogger(),
-			p.GetCounterCreatedFailed(),
-		)
-	}
-
-	// Execute the query.
-	var returnedID string
-	if err := p.Client.QueryRowContext(ctx, insertSQL, args...).Scan(&returnedID); err != nil { //nolint:gosec // goqu quotes the table identifier and parameterizes all values in insertSQL.
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
-			p.GetLogger(),
-			p.GetCounterCreatedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, p, id, trgt, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterCreatedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	p.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Created.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	p.GetCounterCreated().Add(1)
-
-	return returnedID, nil
+		return envelope.Result[string]{Value: returnedID, PostHookData: v}, nil
+	})
 }
 
 // Update data.
 func (p *Postgres) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			p.GetLogger(),
-			p.GetCounterUpdatedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[update.Update, envelope.Void](ctx, envelope.Config[update.Update]{
+		Storage:  p,
+		Adapter:  Name,
+		Status:   status.Updated.String(),
+		ID:       id,
+		HookData: v,
+		ResolveTarget: func() (string, error) {
+			var err error
 
-	ctx, span := customapm.Trace(
-		ctx,
-		p.GetType(),
-		Name,
-		status.Updated.String(),
-	)
-	defer span.End()
+			trgt, err = shared.TargetName(target, p.Target)
 
-	//////
-	// Options initialization.
-	//////
+			return trgt, err
+		},
+		Param:          prm,
+		Options:        options,
+		NewParams:      update.New,
+		RequiresID:     true,
+		SuccessCounter: p.GetCounterUpdated(),
+		FailureCounter: p.GetCounterUpdatedFailed(),
+	}, func(ctx context.Context, _ *update.Update) (envelope.Result[envelope.Void], error) {
+		// Build the statement.
+		ds := goqu.Dialect(Name).Update(trgt).Set(v).Where(goqu.C("id").Eq(id))
 
-	o, err := storage.NewOptions[*update.Update]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterUpdatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterUpdatedFailed())
+		// Convert the query to SQL, and arguments.
+		updateSQL, args, err := ds.ToSQL()
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationUpdate.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := update.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterUpdatedFailed())
-	}
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, p.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterUpdatedFailed())
-	}
-
-	//////
-	// Update.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, p, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterUpdatedFailed())
+		res, err := p.Client.ExecContext(ctx, updateSQL, args...)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationUpdate.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	// Build the statement.
-	ds := goqu.Dialect(Name).Update(trgt).Set(v).Where(goqu.C("id").Eq(id))
-
-	// Convert the query to SQL, and arguments.
-	updateSQL, args, err := ds.ToSQL()
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
-			p.GetLogger(),
-			p.GetCounterUpdatedFailed(),
-		)
-	}
-
-	res, err := p.Client.ExecContext(ctx, updateSQL, args...) //nolint:gosec // goqu quotes the table identifier and parameterizes all values in updateSQL.
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
-			p.GetLogger(),
-			p.GetCounterUpdatedFailed(),
-		)
-	}
-
-	// Surface updates that matched nothing as 404, consistent with Retrieve.
-	if rowsAffected, err := res.RowsAffected(); err == nil && rowsAffected == 0 {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewHTTPError(http.StatusNotFound),
-			p.GetLogger(),
-			p.GetCounterUpdatedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, p, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, p.GetLogger(), p.GetCounterUpdatedFailed())
+		// Surface updates that matched nothing as 404, consistent with Retrieve.
+		if rowsAffected, err := res.RowsAffected(); err == nil && rowsAffected == 0 {
+			return envelope.Result[envelope.Void]{}, customerror.NewHTTPError(http.StatusNotFound)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	// Correlates the transaction, span and log, and logs it.
-	p.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Updated.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	p.GetCounterUpdated().Add(1)
-
-	return nil
+	return err
 }
 
 // GetClient returns the client.
 func (p *Postgres) GetClient() any {
 	return p.Client
+}
+
+// Close releases the resources held by the storage.
+func (p *Postgres) Close() error {
+	var err error
+
+	p.closeOnce.Do(func() {
+		err = p.Client.Close()
+	})
+
+	return err
 }
 
 //////

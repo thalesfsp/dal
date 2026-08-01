@@ -159,13 +159,17 @@ func infoRoute(next func(w http.ResponseWriter, r *http.Request, body []byte)) f
 // source document. It implements just enough of the API surface the
 // ElasticSearch adapter actually calls.
 type memStore struct {
-	mu   sync.Mutex
-	docs map[string]map[string]map[string]any
+	mu        sync.Mutex
+	docs      map[string]map[string]map[string]any
+	rejectIDs map[string]int
 }
 
 // newMemStore returns an empty store.
 func newMemStore() *memStore {
-	return &memStore{docs: map[string]map[string]map[string]any{}}
+	return &memStore{
+		docs:      map[string]map[string]map[string]any{},
+		rejectIDs: map[string]int{},
+	}
 }
 
 // route implements the fakeServer route signature, dispatching by
@@ -206,9 +210,61 @@ func (m *memStore) route(w http.ResponseWriter, r *http.Request, body []byte) {
 	case r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "_search":
 		m.search(w, parts[0])
 
+	case r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "_bulk":
+		m.bulk(w, parts[0], body)
+
 	default:
 		writeJSON(w, http.StatusNotFound, `{"error":{"type":"not_found","reason":"no route configured"},"status":404}`)
 	}
+}
+
+func (m *memStore) bulk(w http.ResponseWriter, index string, body []byte) {
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	items := make([]map[string]any, 0, len(lines)/2)
+
+	for lineIndex := 0; lineIndex+1 < len(lines); lineIndex += 2 {
+		var metadata map[string]struct {
+			ID string `json:"_id"`
+		}
+		var doc map[string]any
+
+		if err := json.Unmarshal([]byte(lines[lineIndex]), &metadata); err != nil {
+			writeJSON(w, http.StatusBadRequest, `{"error":{"type":"parse_exception","reason":"bad metadata"},"status":400}`)
+
+			return
+		}
+		if err := json.Unmarshal([]byte(lines[lineIndex+1]), &doc); err != nil {
+			writeJSON(w, http.StatusBadRequest, `{"error":{"type":"parse_exception","reason":"bad document"},"status":400}`)
+
+			return
+		}
+
+		operation := metadata["index"]
+		m.mu.Lock()
+		status := m.rejectIDs[operation.ID]
+		if status == 0 {
+			status = http.StatusCreated
+			if m.docs[index] == nil {
+				m.docs[index] = map[string]map[string]any{}
+			}
+			m.docs[index][operation.ID] = doc
+		}
+		m.mu.Unlock()
+
+		item := map[string]any{"status": status}
+		if status < http.StatusOK || status >= http.StatusMultipleChoices {
+			item["error"] = map[string]any{"type": "rejected_by_fake", "reason": "rejected " + operation.ID}
+		}
+		items = append(items, map[string]any{"index": item})
+	}
+
+	response, err := json.Marshal(map[string]any{"errors": true, "items": items})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, `{"error":{"type":"internal","reason":"marshal failed"},"status":500}`)
+
+		return
+	}
+	writeJSON(w, http.StatusOK, string(response))
 }
 
 func (m *memStore) indexDoc(w http.ResponseWriter, index, id string, body []byte) {

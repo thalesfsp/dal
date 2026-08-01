@@ -3,11 +3,11 @@ package memory_test
 import (
 	"context"
 	"fmt"
-	"sort"
 
-	"github.com/thalesfsp/dal/v2/memory"
+	"github.com/thalesfsp/dal/v3/memory"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
+	"github.com/thalesfsp/params/v2/customsort"
 	"github.com/thalesfsp/params/v2/delete"
 	"github.com/thalesfsp/params/v2/list"
 	"github.com/thalesfsp/params/v2/retrieve"
@@ -48,8 +48,7 @@ func Example_createAndRetrieve() {
 }
 
 // Example_list shows that List's Search field is a glob matched against ids,
-// not a value filter, and that results carry no guaranteed order, so callers
-// wanting a stable order must sort the returned items themselves.
+// not a value filter, and that Sort gives callers a stable result order.
 func Example_list() {
 	ctx := context.Background()
 
@@ -74,14 +73,13 @@ func Example_list() {
 
 	var result memory.ResponseList[book]
 
-	if err := s.List(ctx, "", &result, &list.List{Search: "book-*"}); err != nil {
+	if err := s.List(ctx, "", &result, &list.List{
+		Search: "book-*",
+		Sort:   customsort.SortSlice{{"id", customsort.Asc}},
+	}); err != nil {
 		fmt.Println(err)
 		return
 	}
-
-	sort.Slice(result.Items, func(i, j int) bool {
-		return result.Items[i].ID < result.Items[j].ID
-	})
 
 	for _, item := range result.Items {
 		fmt.Println(item.ID, item.Title)

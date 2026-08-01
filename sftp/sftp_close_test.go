@@ -42,19 +42,19 @@ func TestSFTP_List_HonorsSearchGlob(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(`{}`), 0o600))
 	}
 
-	var jsonOnly ResponseListKeys
+	var jsonOnly ResponseList[map[string]any]
 
 	require.NoError(t, str.List(ctx, dir, &jsonOnly, &list.List{Search: "*.json"}))
-	assert.ElementsMatch(t, []string{"a.json", "b.json"}, jsonOnly.Keys)
+	assert.Len(t, jsonOnly.Items, 2)
 
 	// Empty search means match-all, matching Count's behavior.
-	var all ResponseListKeys
+	var all ResponseList[map[string]any]
 
 	require.NoError(t, str.List(ctx, dir, &all, &list.List{Search: ""}))
-	assert.Len(t, all.Keys, 3)
+	assert.Len(t, all.Items, 3)
 
 	// A malformed pattern surfaces as an error instead of an empty listing.
-	var none ResponseListKeys
+	var none ResponseList[map[string]any]
 
 	assert.Error(t, str.List(ctx, dir, &none, &list.List{Search: "["}))
 }

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/thalesfsp/dal/v2/internal/shared"
+	"github.com/thalesfsp/dal/v3/internal/shared"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/customsort"
@@ -153,21 +153,17 @@ func TestNew(t *testing.T) {
 			// Should be able to list doc.
 			//////
 
-			var listItems ResponseListKeys
+			var listItems ResponseList[shared.TestDataWithIDS]
 
 			assert.NoError(t, str.List(tt.args.ctx, dir, &listItems, listParam))
 			assert.NotNil(t, listItems)
-			assert.NotEmpty(t, listItems.Keys)
+			assert.NotEmpty(t, listItems.Items)
 
 			// Ensure that the test item is in the list.
 			found := false
 
-			for _, item := range listItems.Keys {
-				item = path.Join(dir, item)
-
-				if item == trgt {
-					assert.Equal(t, item, trgt)
-
+			for _, item := range listItems.Items {
+				if item.ID == tt.args.id {
 					found = true
 
 					break
@@ -193,11 +189,11 @@ func TestNew(t *testing.T) {
 			// Should confirm there's no docs.
 			//////
 
-			var emptyListItems ResponseListKeys
+			var emptyListItems ResponseList[shared.TestDataWithIDS]
 
-			assert.NoError(t, str.List(tt.args.ctx, dir, &listItems, listParam))
+			assert.NoError(t, str.List(tt.args.ctx, dir, &emptyListItems, listParam))
 			assert.NotNil(t, emptyListItems)
-			assert.Empty(t, emptyListItems.Keys)
+			assert.Empty(t, emptyListItems.Items)
 
 			// Should check if the metrics are working.
 			assert.Equal(t, int64(1), str.GetCounterCounted().Value())

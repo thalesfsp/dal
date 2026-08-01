@@ -1,23 +1,228 @@
 package bolt
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thalesfsp/customerror"
-	"github.com/thalesfsp/dal/v2/internal/shared"
+	"github.com/thalesfsp/dal/v3/internal/shared"
+	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
+	"github.com/thalesfsp/params/v2/customsort"
 	"github.com/thalesfsp/params/v2/delete"
 	"github.com/thalesfsp/params/v2/list"
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
 	bbolt "go.etcd.io/bbolt"
+	berrors "go.etcd.io/bbolt/errors"
 )
+
+type boltBulkDocument struct {
+	Value string `json:"value"`
+}
+
+func boltBulkItems(count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for index := range items {
+		items[index] = storage.BulkItem{
+			ID:    fmt.Sprintf("bulk-item-%d", index),
+			Value: boltBulkDocument{Value: fmt.Sprintf("value-%d", index)},
+		}
+	}
+
+	return items
+}
+
+func TestBoltBulkCreateHappyPathManyItems(t *testing.T) {
+	str := newTestStorage(t)
+	items := boltBulkItems(60)
+
+	result, err := str.BulkCreate(t.Context(), "bulk-docs", items, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(items), len(result.Succeeded))
+	require.Empty(t, result.Failures)
+	require.False(t, result.Stopped)
+
+	for index, item := range items {
+		require.Equal(t, index, result.Succeeded[index])
+
+		var got boltBulkDocument
+		require.NoError(t, str.Retrieve(t.Context(), item.ID, "bulk-docs", &got, nil))
+		require.Equal(t, item.Value, got)
+	}
+}
+
+func TestBoltBulkCreateEmptyInput(t *testing.T) {
+	str := newTestStorage(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	result, err := str.BulkCreate(ctx, "bulk-docs", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, storage.BulkResult{}, result)
+}
+
+func TestBoltBulkCreateSingleItem(t *testing.T) {
+	str := newTestStorage(t)
+	items := boltBulkItems(1)
+
+	result, err := str.BulkCreate(t.Context(), "bulk-docs", items, nil)
+	require.NoError(t, err)
+	require.Equal(t, []int{0}, result.Succeeded)
+
+	var got boltBulkDocument
+	require.NoError(t, str.Retrieve(t.Context(), items[0].ID, "bulk-docs", &got, nil))
+	require.Equal(t, items[0].Value, got)
+}
+
+func TestBoltBulkCreatePartialFailureIsNotAtomic(t *testing.T) {
+	str := newTestStorage(t)
+	items := boltBulkItems(35)
+	rejected := errors.New("rejected by bolt bulk test")
+	preHook := func(_ context.Context, _ storage.IStorage, id, _ string, _ any, _ *create.Create) error {
+		if id == items[27].ID {
+			return rejected
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(t.Context(), "bulk-docs", items, nil, storage.WithPreHook(preHook))
+	require.Error(t, err)
+	require.False(t, result.Stopped)
+	require.Len(t, result.Failures, 1)
+	if failureIndices := []int{result.Failures[0].Index}; !reflect.DeepEqual(failureIndices, []int{27}) {
+		t.Fatalf("failure indices = %v, want [27]", failureIndices)
+	}
+	require.ErrorIs(t, result.Failures[0].Err, rejected)
+
+	for index, item := range items {
+		var got boltBulkDocument
+		retrieveErr := str.Retrieve(t.Context(), item.ID, "bulk-docs", &got, nil)
+		if index == 27 {
+			require.Error(t, retrieveErr)
+
+			continue
+		}
+
+		require.NoError(t, retrieveErr, "successful item %d was rolled back", index)
+		require.Equal(t, item.Value, got)
+	}
+}
+
+func TestBoltBulkCreateContextCancellationMidBatch(t *testing.T) {
+	str := newTestStorage(t)
+	items := boltBulkItems(40)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	attempted := 0
+	preHook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+		attempted++
+		if attempted == 7 {
+			cancel()
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(ctx, "bulk-docs", items, nil, storage.WithPreHook(preHook))
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, result.Stopped)
+	require.Equal(t, []int{0, 1, 2, 3, 4, 5, 6}, result.Succeeded)
+	require.Len(t, result.Failures, len(items)-attempted)
+
+	for index, item := range items {
+		var got boltBulkDocument
+		retrieveErr := str.Retrieve(t.Context(), item.ID, "bulk-docs", &got, nil)
+		if index < attempted {
+			require.NoError(t, retrieveErr, "already-written item %d", index)
+		} else {
+			require.Error(t, retrieveErr, "unattempted item %d", index)
+		}
+	}
+}
+
+func TestBoltCommitBulkCreateChunkWithNoPreparedItemsLeavesOutcomesUntouched(t *testing.T) {
+	t.Parallel()
+
+	str := newTestStorage(t)
+	want := []boltBulkOutcome{{succeeded: true}, {err: errors.New("existing failure")}}
+	outcomes := append([]boltBulkOutcome(nil), want...)
+
+	str.commitBulkCreateChunk(t.Context(), "bulk-docs", nil, outcomes)
+
+	if !reflect.DeepEqual(outcomes, want) {
+		t.Fatalf("commitBulkCreateChunk() outcomes = %#v, want %#v", outcomes, want)
+	}
+}
+
+func TestBoltBulkCreatePostHookFailureReportsCommittedItem(t *testing.T) {
+	t.Parallel()
+
+	str := newTestStorage(t)
+	items := boltBulkItems(3)
+	rejected := errors.New("Bolt post-hook rejected item")
+	postHook := func(_ context.Context, _ storage.IStorage, id, _ string, _ any, _ *create.Create) error {
+		if id == items[1].ID {
+			return rejected
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(t.Context(), "bulk-docs", items, nil, storage.WithPostHook(postHook))
+	if got, want := err.Error(), "bulk operation completed with 1 unsuccessful item(s)"; got != want {
+		t.Fatalf("BulkCreate() error = %q, want %q", got, want)
+	}
+	if result.Stopped {
+		t.Fatal("BulkCreate() result.Stopped = true, want false")
+	}
+	if got, want := result.Succeeded, []int{0, 2}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("succeeded indices = %v, want %v", got, want)
+	}
+	require.Len(t, result.Failures, 1)
+	assert.Equal(t, 1, result.Failures[0].Index)
+	assert.ErrorIs(t, result.Failures[0].Err, rejected)
+	assert.ErrorIs(t, err, rejected)
+
+	for index, item := range items {
+		var got boltBulkDocument
+		require.NoError(t, str.Retrieve(t.Context(), item.ID, "bulk-docs", &got, nil), "committed item %d", index)
+		assert.Equal(t, item.Value, got)
+	}
+}
+
+func TestBoltBulkCreateTransactionFailureFansOutToEveryPreparedItem(t *testing.T) {
+	t.Parallel()
+
+	str := newTestStorage(t)
+	require.NoError(t, str.Close())
+	items := boltBulkItems(3)
+
+	result, err := str.BulkCreate(t.Context(), "bulk-docs", items, nil)
+	if got, want := err.Error(), "bulk operation completed with 3 unsuccessful item(s)"; got != want {
+		t.Fatalf("BulkCreate() error = %q, want %q", got, want)
+	}
+	assert.False(t, result.Stopped)
+	assert.Empty(t, result.Succeeded)
+	require.Len(t, result.Failures, len(items))
+	for index, failure := range result.Failures {
+		assert.Equal(t, index, failure.Index)
+		assert.Equal(t, "failed to create. Original Error: database not open", failure.Err.Error())
+		assert.ErrorIs(t, failure.Err, berrors.ErrDatabaseNotOpen)
+	}
+	assert.ErrorIs(t, err, berrors.ErrDatabaseNotOpen)
+}
 
 //////
 // Offline tests exercising the real bbolt-backed adapter against a
@@ -239,6 +444,190 @@ func TestBolt_ListLimit(t *testing.T) {
 	assert.Len(t, all.Items, 5)
 }
 
+type boltListParamsDoc struct {
+	ID    string `json:"id"`
+	Group string `json:"group"`
+	Rank  int    `json:"rank"`
+	Drop  string `json:"drop"`
+}
+
+func seedBoltListParams(t *testing.T, str *Bolt, target string) {
+	t.Helper()
+
+	for i := range 13 {
+		doc := &boltListParamsDoc{
+			ID:    fmt.Sprintf("doc-%02d", i),
+			Group: []string{"b", "a"}[i%2],
+			Rank:  i,
+			Drop:  "drop",
+		}
+		_, err := str.Create(t.Context(), "params-"+doc.ID, target, doc, nil)
+		require.NoError(t, err)
+	}
+}
+
+func TestBolt_ListParams(t *testing.T) {
+	ctx := t.Context()
+	str := newTestStorage(t)
+	seedBoltListParams(t, str, "docs")
+
+	listDocs := func(t *testing.T, prm *list.List) []boltListParamsDoc {
+		t.Helper()
+
+		var got ResponseList[boltListParamsDoc]
+		require.NoError(t, str.List(ctx, "docs", &got, prm))
+
+		return got.Items
+	}
+
+	t.Run("sort ascending and descending", func(t *testing.T) {
+		asc := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+		})
+		require.Len(t, asc, 10)
+		assert.Equal(t, 0, asc[0].Rank)
+		assert.Equal(t, 9, asc[9].Rank)
+
+		desc := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Desc}},
+		})
+		require.Len(t, desc, 10)
+		assert.Equal(t, 12, desc[0].Rank)
+		assert.Equal(t, 3, desc[9].Rank)
+	})
+
+	t.Run("literal sort params inherit default limit and agree with pre-hook", func(t *testing.T) {
+		var (
+			got       ResponseList[boltListParamsDoc]
+			hookLimit int
+		)
+
+		err := str.List(ctx, "docs", &got, &list.List{
+			Sort: customsort.SortSlice{{"rank", customsort.Asc}},
+		}, storage.WithPreHook(func(
+			_ context.Context,
+			_ storage.IStorage,
+			_, _ string,
+			_ any,
+			params *list.List,
+		) error {
+			hookLimit = params.Limit
+
+			return nil
+		}))
+		require.NoError(t, err)
+		require.Equal(t, 10, hookLimit)
+		require.Len(t, got.Items, hookLimit)
+	})
+
+	t.Run("multi-key sort breaks ties with second key", func(t *testing.T) {
+		got := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort: customsort.SortSlice{
+				{"group", customsort.Asc},
+				{"rank", customsort.Desc},
+			},
+		})
+		require.Len(t, got, 10)
+		assert.Equal(t, "a", got[0].Group)
+		assert.Equal(t, 11, got[0].Rank)
+		assert.Equal(t, 9, got[1].Rank)
+		assert.Equal(t, "b", got[6].Group)
+		assert.Equal(t, 12, got[6].Rank)
+	})
+
+	t.Run("offset alone", func(t *testing.T) {
+		assert.Len(t, listDocs(t, &list.List{Search: "params-*", Offset: 3}), 10)
+	})
+
+	t.Run("limit alone", func(t *testing.T) {
+		assert.Len(t, listDocs(t, &list.List{Search: "params-*", Limit: 4}), 4)
+	})
+
+	t.Run("offset and limit", func(t *testing.T) {
+		got := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+			Offset: 3,
+			Limit:  4,
+		})
+		require.Len(t, got, 4)
+		assert.Equal(t, []int{3, 4, 5, 6}, []int{got[0].Rank, got[1].Rank, got[2].Rank, got[3].Rank})
+	})
+
+	t.Run("fields projection", func(t *testing.T) {
+		var got ResponseList[map[string]any]
+		require.NoError(t, str.List(ctx, "docs", &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+			Fields: []string{"id"},
+		}))
+		require.Len(t, got.Items, 10)
+		assert.Equal(t, map[string]any{"id": "doc-00"}, got.Items[0])
+	})
+
+	t.Run("combined", func(t *testing.T) {
+		var got ResponseList[map[string]any]
+		require.NoError(t, str.List(ctx, "docs", &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Desc}},
+			Offset: 2,
+			Limit:  3,
+			Fields: []string{"id"},
+		}))
+		assert.Equal(t, []map[string]any{
+			{"id": "doc-10"},
+			{"id": "doc-09"},
+			{"id": "doc-08"},
+		}, got.Items)
+	})
+
+	t.Run("list.New default limits to ten", func(t *testing.T) {
+		prm, err := list.New()
+		require.NoError(t, err)
+		prm.Search = "params-*"
+
+		assert.Len(t, listDocs(t, prm), 10)
+	})
+
+	t.Run("nil params leave behavior unchanged", func(t *testing.T) {
+		assert.Len(t, listDocs(t, nil), 13)
+	})
+
+	t.Run("invalid sort order uses normal error path", func(t *testing.T) {
+		failedBefore := str.GetCounterListedFailed().Value()
+
+		var got ResponseList[boltListParamsDoc]
+		err := str.List(ctx, "docs", &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", "sideways"}},
+		})
+		require.Error(t, err)
+		assert.Equal(t, failedBefore+1, str.GetCounterListedFailed().Value())
+	})
+}
+
+func TestBolt_ListSortsFullMatchedSetBeforeLimit(t *testing.T) {
+	str := newTestStorage(t)
+	seedBoltListParams(t, str, "docs")
+
+	var got ResponseList[boltListParamsDoc]
+	require.NoError(t, str.List(t.Context(), "docs", &got, &list.List{
+		Search: "params-*",
+		Sort:   customsort.SortSlice{{"rank", customsort.Desc}},
+		Limit:  3,
+	}))
+
+	require.Len(t, got.Items, 3)
+	assert.Equal(t, []int{12, 11, 10}, []int{
+		got.Items[0].Rank,
+		got.Items[1].Rank,
+		got.Items[2].Rank,
+	})
+}
+
 // Two different targets are independent buckets: same id, different data.
 func TestBolt_MultipleTargets(t *testing.T) {
 	ctx := t.Context()
@@ -337,18 +726,60 @@ func TestBolt_New_OpenFailure(t *testing.T) {
 	require.Error(t, err)
 }
 
-// Close releases the file lock; bbolt's own Close is idempotent, and a
-// second call must stay safe (no panic, no error) rather than surface a
-// spurious failure.
 func TestBolt_Close(t *testing.T) {
-	str := newTestStorage(t)
+	t.Run("releases file lock", func(t *testing.T) {
+		str := newTestStorage(t)
+		dbPath := str.Config.Path
 
-	require.NoError(t, str.Close())
-	assert.NoError(t, str.Close())
+		require.NoError(t, str.Close())
 
-	// Close on a Bolt without a Client is a no-op, not a nil dereference.
-	var empty Bolt
-	assert.NoError(t, empty.Close())
+		reopened, err := New(t.Context(), dbPath, &bbolt.Options{Timeout: 100 * time.Millisecond})
+		if err != nil {
+			t.Fatalf("reopening database after Close failed: %v", err)
+		}
+
+		t.Cleanup(func() { _ = reopened.Close() })
+	})
+
+	t.Run("idempotent", func(t *testing.T) {
+		str := newTestStorage(t)
+
+		require.NoError(t, str.Close())
+		assert.NoError(t, str.Close())
+
+		// Close on a Bolt without a Client is a no-op, not a nil dereference.
+		var empty Bolt
+		assert.NoError(t, empty.Close())
+	})
+
+	t.Run("concurrent", func(t *testing.T) {
+		str := newTestStorage(t)
+
+		const goroutines = 8
+
+		start := make(chan struct{})
+		errs := make(chan error, goroutines)
+
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+
+		for range goroutines {
+			go func() {
+				defer wg.Done()
+				<-start
+
+				errs <- str.Close()
+			}()
+		}
+
+		close(start)
+		wg.Wait()
+		close(errs)
+
+		for err := range errs {
+			require.NoError(t, err)
+		}
+	})
 }
 
 //////

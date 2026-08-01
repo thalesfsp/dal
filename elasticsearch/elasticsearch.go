@@ -12,10 +12,11 @@ import (
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"github.com/thalesfsp/customerror"
-	"github.com/thalesfsp/dal/v2/internal/customapm"
-	"github.com/thalesfsp/dal/v2/internal/logging"
-	"github.com/thalesfsp/dal/v2/internal/shared"
-	"github.com/thalesfsp/dal/v2/storage"
+	"github.com/thalesfsp/dal/v3/internal/customapm"
+	"github.com/thalesfsp/dal/v3/internal/envelope"
+	"github.com/thalesfsp/dal/v3/internal/logging"
+	"github.com/thalesfsp/dal/v3/internal/shared"
+	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/customsort"
@@ -60,6 +61,8 @@ type ElasticSearch struct {
 
 	// Client is the ElasticSearch client.
 	Client *elasticsearch.Client `json:"-" validate:"required,structonly"`
+
+	closeOnce sync.Once
 
 	// Config is the ElasticSearch configuration.
 	Config Config `json:"-"`
@@ -187,6 +190,30 @@ func buildQuery(params *list.List, addons ...string) (string, error) {
 	return builder.String(), nil
 }
 
+// elasticEnvelopeOptions passes the index name resolved inside Run to the
+// user's hooks without moving target resolution outside the traced envelope.
+func elasticEnvelopeOptions[T any](target *string, options []storage.Func[T]) []storage.Func[T] {
+	result := make([]storage.Func[T], 0, len(options)+1)
+	result = append(result, options...)
+	result = append(result, func(o *storage.Options[T]) error {
+		if preHook := o.PreHookFunc; preHook != nil {
+			o.PreHookFunc = func(ctx context.Context, strg storage.IStorage, id, _ string, data any, param T) error {
+				return preHook(ctx, strg, id, *target, data, param)
+			}
+		}
+
+		if postHook := o.PostHookFunc; postHook != nil {
+			o.PostHookFunc = func(ctx context.Context, strg storage.IStorage, id, _ string, data any, param T) error {
+				return postHook(ctx, strg, id, *target, data, param)
+			}
+		}
+
+		return nil
+	})
+
+	return result
+}
+
 // CreateIndex creates a new index in Elasticsearch.
 func (es *ElasticSearch) CreateIndex(ctx context.Context, name, mapping string) error {
 	indexName, err := shared.TargetName(name, name)
@@ -237,603 +264,291 @@ func (es *ElasticSearch) DeleteIndex(ctx context.Context, name string) error {
 
 // Count returns the number of items in the storage.
 func (es *ElasticSearch) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
-	//////
-	// APM Tracing.
-	//////
+	var trgt string
 
-	ctx, span := customapm.Trace(
-		ctx,
-		es.GetType(),
-		Name,
-		status.Counted.String(),
-	)
-	defer span.End()
+	return envelope.Run[count.Count, int64](ctx, envelope.Config[count.Count]{
+		Storage:        es,
+		Adapter:        Name,
+		Status:         status.Counted.String(),
+		Target:         target,
+		Options:        elasticEnvelopeOptions(&trgt, options),
+		SuccessCounter: es.GetCounterCounted(),
+		FailureCounter: es.GetCounterCountedFailed(),
+		NewParams: func() (*count.Count, error) {
+			params, err := count.New()
+			if err != nil {
+				return nil, err
+			}
 
-	//////
-	// Options initialization.
-	//////
+			params.Search = matchAllQuery
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, es.Target())
 
-	o, err := storage.NewOptions[*count.Count]()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCountedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return 0, customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCountedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := count.New()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCountedFailed())
-	}
-
-	finalParam.Search = matchAllQuery
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, es.Target())
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCountedFailed())
-	}
-
-	//////
-	// Count.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, es, "", trgt, nil, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCountedFailed())
-		}
-	}
-
-	// Create a new search request.
-	req := esapi.SearchRequest{
-		Index: []string{trgt},
-	}
-
-	// Enables routing if specified.
-	if finalParam.Routing != nil {
-		req.Routing = finalParam.Routing
-	}
-
-	query, err := buildQuery(&list.List{
-		Search: finalParam.Search,
-		Any: &ListAny{
-			TrackTotalHits: true,
+			return params, err
 		},
-	})
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCountedFailed())
-	}
+	}, func(ctx context.Context, params *count.Count) (envelope.Result[int64], error) {
+		req := esapi.SearchRequest{Index: []string{trgt}}
+		if params.Routing != nil {
+			req.Routing = params.Routing
+		}
 
-	// Set the query.
-	req.Body = strings.NewReader(query)
+		query, err := buildQuery(&list.List{
+			Search: params.Search,
+			Any:    &ListAny{TrackTotalHits: true},
+		})
+		if err != nil {
+			return envelope.Result[int64]{}, err
+		}
+		req.Body = strings.NewReader(query)
 
-	// Execute the search request.
-	res, err := req.Do(ctx, es.Client)
-	if err != nil {
-		return 0, customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCount.String(), customerror.WithError(err)),
-			es.GetLogger(),
-			es.GetCounterCountedFailed())
-	}
+		res, err := req.Do(ctx, es.Client)
+		if err != nil {
+			return envelope.Result[int64]{}, customerror.NewFailedToError(
+				storage.OperationCount.String(),
+				customerror.WithError(err),
+			)
+		}
+		defer res.Body.Close()
 
-	defer res.Body.Close()
+		if err := checkResponseIsError(res); err != nil {
+			return envelope.Result[int64]{}, err
+		}
 
-	// An ES error response carries an `error` envelope and no `hits`, so
-	// decoding it without this check yields a silent, plausible-looking
-	// count of 0.
-	if err := checkResponseIsError(res); err != nil {
-		return 0, customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCountedFailed())
-	}
+		var mapResp map[string]any
+		if err := shared.Decode(res.Body, &mapResp); err != nil {
+			return envelope.Result[int64]{}, err
+		}
 
-	// Parse the response.
-	var mapResp map[string]any
-
-	// Decode the JSON response and using a pointer.
-	if err := shared.Decode(res.Body, &mapResp); err != nil {
-		return 0, customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCountedFailed())
-	}
-
-	// Access the value of the "total" field.
-	var total int
-
-	if hits, ok := mapResp["hits"].(map[string]any); ok {
-		if totalHits, ok := hits["total"].(map[string]any); ok {
-			if value, ok := totalHits["value"].(float64); ok {
-				total = int(value)
+		var total int64
+		if hits, ok := mapResp["hits"].(map[string]any); ok {
+			if totalHits, ok := hits["total"].(map[string]any); ok {
+				if value, ok := totalHits["value"].(float64); ok {
+					total = int64(value)
+				}
 			}
 		}
-	}
 
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, es, "", trgt, total, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCountedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	es.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Counted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	es.GetCounterCounted().Add(1)
-
-	return int64(total), nil
+		return envelope.Result[int64]{Value: total, PostHookData: int(total)}, nil
+	})
 }
 
 // Delete removes data.
 func (es *ElasticSearch) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			es.GetLogger(),
-			es.GetCounterDeletedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[delete.Delete, envelope.Void](ctx, envelope.Config[delete.Delete]{
+		Storage:        es,
+		Adapter:        Name,
+		Status:         status.Deleted.String(),
+		ID:             id,
+		Target:         target,
+		Options:        elasticEnvelopeOptions(&trgt, options),
+		RequiresID:     true,
+		SuccessCounter: es.GetCounterDeleted(),
+		FailureCounter: es.GetCounterDeletedFailed(),
+		NewParams: func() (*delete.Delete, error) {
+			params, err := delete.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		es.GetType(),
-		Name,
-		status.Deleted.String(),
-	)
-	defer span.End()
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, es.Target())
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*delete.Delete]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterDeletedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterDeletedFailed())
+			return params, err
+		},
+	}, func(ctx context.Context, params *delete.Delete) (envelope.Result[envelope.Void], error) {
+		reqOpts := []func(*esapi.DeleteRequest){es.Client.Delete.WithContext(ctx)}
+		if params.Routing != "" {
+			reqOpts = append(reqOpts, es.Client.Delete.WithRouting(params.Routing))
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := delete.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterDeletedFailed())
-	}
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, es.Target())
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterDeletedFailed())
-	}
-
-	//////
-	// Delete.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, es, id, trgt, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterDeletedFailed())
+		res, err := es.Client.Delete(trgt, id, reqOpts...)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationDelete.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
+		defer res.Body.Close()
 
-	reqOpts := []func(*esapi.DeleteRequest){
-		es.Client.Delete.WithContext(ctx),
-	}
-
-	// Enables routing if specified.
-	if finalParam.Routing != "" {
-		reqOpts = append(reqOpts, es.Client.Delete.WithRouting(finalParam.Routing))
-	}
-
-	res, err := es.Client.Delete(trgt, id, reqOpts...)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationDelete.String(), customerror.WithError(err)),
-			es.GetLogger(),
-			es.GetCounterDeletedFailed())
-	}
-
-	defer res.Body.Close()
-
-	if err := checkResponseIsError(res); err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterDeletedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, es, id, trgt, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterDeletedFailed())
+		if err := checkResponseIsError(res); err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		return envelope.Result[envelope.Void]{}, nil
+	})
 
-	// Correlates the transaction, span and log, and logs it.
-	es.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Deleted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	es.GetCounterDeleted().Add(1)
-
-	return nil
+	return err
 }
 
 // Retrieve data.
 func (es *ElasticSearch) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			es.GetLogger(),
-			es.GetCounterRetrievedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[retrieve.Retrieve, envelope.Void](ctx, envelope.Config[retrieve.Retrieve]{
+		Storage:        es,
+		Adapter:        Name,
+		Status:         status.Retrieved.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        elasticEnvelopeOptions(&trgt, options),
+		RequiresID:     true,
+		SuccessCounter: es.GetCounterRetrieved(),
+		FailureCounter: es.GetCounterRetrievedFailed(),
+		NewParams: func() (*retrieve.Retrieve, error) {
+			params, err := retrieve.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		es.GetType(),
-		Name,
-		status.Retrieved.String(),
-	)
-	defer span.End()
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, es.Target())
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*retrieve.Retrieve]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterRetrievedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterRetrievedFailed())
+			return params, err
+		},
+	}, func(ctx context.Context, params *retrieve.Retrieve) (envelope.Result[envelope.Void], error) {
+		reqOpts := []func(*esapi.GetRequest){es.Client.Get.WithContext(ctx)}
+		if params.Routing != "" {
+			reqOpts = append(reqOpts, es.Client.Get.WithRouting(params.Routing))
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := retrieve.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterRetrievedFailed())
-	}
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, es.Target())
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterRetrievedFailed())
-	}
-
-	//////
-	// Retrieve.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, es, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterRetrievedFailed())
+		res, err := es.Client.Get(trgt, id, reqOpts...)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationRetrieve.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
+		defer res.Body.Close()
 
-	reqOpts := []func(*esapi.GetRequest){
-		es.Client.Get.WithContext(ctx),
-	}
-
-	// Enables routing if specified.
-	if finalParam.Routing != "" {
-		reqOpts = append(reqOpts, es.Client.Get.WithRouting(finalParam.Routing))
-	}
-
-	res, err := es.Client.Get(trgt, id, reqOpts...)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationRetrieve.String(), customerror.WithError(err)),
-			es.GetLogger(),
-			es.GetCounterRetrievedFailed(),
-		)
-	}
-
-	defer res.Body.Close()
-
-	if err := checkResponseIsError(res); err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterRetrievedFailed())
-	}
-
-	// Parse response body.
-	getResponse := ResponseSourceFromES{}
-
-	if err := parseResponseBody(res.Body, &getResponse); err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterRetrievedFailed())
-	}
-
-	if err := storage.ParseToStruct(getResponse.Data, v); err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterRetrievedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, es, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterRetrievedFailed())
+		if err := checkResponseIsError(res); err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		getResponse := ResponseSourceFromES{}
+		if err := parseResponseBody(res.Body, &getResponse); err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
 
-	// Correlates the transaction, span and log, and logs it.
-	es.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Retrieved.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
+		if err := storage.ParseToStruct(getResponse.Data, v); err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
 
-	//////
-	// Metrics.
-	//////
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	es.GetCounterRetrieved().Add(1)
-
-	return nil
+	return err
 }
 
 // List data.
 //
-// NOTE: It uses param.List.Search to query the data.
+// Search is the Elasticsearch query body. Sort, Limit, Offset, and Fields are
+// translated into the search request.
 //
 //nolint:nestif,gocognit
 func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
-	//////
-	// APM Tracing.
-	//////
+	var trgt string
 
-	ctx, span := customapm.Trace(
-		ctx,
-		es.GetType(),
-		Name,
-		status.Listed.String(),
-	)
-	defer span.End()
+	_, err := envelope.Run[list.List, envelope.Void](ctx, envelope.Config[list.List]{
+		Storage:        es,
+		Adapter:        Name,
+		Status:         status.Listed.String(),
+		Target:         target,
+		HookData:       v,
+		Options:        elasticEnvelopeOptions(&trgt, options),
+		SuccessCounter: es.GetCounterListed(),
+		FailureCounter: es.GetCounterListedFailed(),
+		NewParams: func() (*list.List, error) {
+			params, err := list.New()
+			if err != nil {
+				return nil, err
+			}
 
-	//////
-	// Options initialization.
-	//////
+			params.Search = matchAllQuery
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, es.Target())
 
-	o, err := storage.NewOptions[*list.List]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterListedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterListedFailed())
+			return params, err
+		},
+	}, func(ctx context.Context, params *list.List) (envelope.Result[envelope.Void], error) {
+		req := esapi.SearchRequest{Index: []string{trgt}}
+		if params.Routing != nil {
+			req.Routing = params.Routing
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := list.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterListedFailed())
-	}
-
-	finalParam.Search = matchAllQuery
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, es.Target())
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterListedFailed())
-	}
-
-	//////
-	// List.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, es, "", trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterListedFailed())
+		query, err := buildQuery(params)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
+		req.Body = strings.NewReader(query)
 
-	// Create a new search request.
-	req := esapi.SearchRequest{
-		Index: []string{trgt},
-	}
+		res, err := req.Do(ctx, es.Client)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationList.String(),
+				customerror.WithError(err),
+			)
+		}
+		defer res.Body.Close()
 
-	// Enables routing if specified.
-	if finalParam.Routing != nil {
-		req.Routing = finalParam.Routing
-	}
+		if err := checkResponseIsError(res); err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
 
-	query, err := buildQuery(finalParam)
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterListedFailed())
-	}
+		var mapResp map[string]any
+		if err := shared.Decode(res.Body, &mapResp); err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
 
-	// Set the query.
-	req.Body = strings.NewReader(query)
-
-	// Execute the search request.
-	res, err := req.Do(ctx, es.Client)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationList.String(), customerror.WithError(err)),
-			es.GetLogger(),
-			es.GetCounterListedFailed(),
-		)
-	}
-
-	defer res.Body.Close()
-
-	if err := checkResponseIsError(res); err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterListedFailed())
-	}
-
-	// Parse response body.
-	// Iterate the document "hits" returned by API call
-	// Instantiate a mapping interface for API response
-	var mapResp map[string]any
-
-	// Decode the JSON response and using a pointer
-	if err := shared.Decode(res.Body, &mapResp); err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterListedFailed())
-	}
-
-	// Extract the total count and associate it with prm.Total
-	if prm != nil {
-		if hits, ok := mapResp["hits"].(map[string]any); ok {
-			if totalHits, ok := hits["total"].(map[string]any); ok {
-				if value, ok := totalHits["value"].(float64); ok {
-					prm.Count = int64(value)
+		if prm != nil {
+			if hits, ok := mapResp["hits"].(map[string]any); ok {
+				if totalHits, ok := hits["total"].(map[string]any); ok {
+					if value, ok := totalHits["value"].(float64); ok {
+						prm.Count = int64(value)
+					}
 				}
 			}
 		}
-	}
 
-	hits := []any{}
-
-	// Assert in two checked steps: chaining them panics outright when `hits`
-	// is absent or not an object.
-	hitsField, ok := mapResp["hits"].(map[string]any)
-	if !ok {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("unexpected type for 'hits'", customerror.WithField("hits", mapResp["hits"])),
-			es.GetLogger(),
-			es.GetCounterListedFailed(),
-		)
-	}
-
-	mapHits, ok := hitsField["hits"].([]any)
-	if !ok {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("unexpected type for 'hits'", customerror.WithField("hits", hits)),
-			es.GetLogger(),
-			es.GetCounterListedFailed(),
-		)
-	}
-
-	for _, hit := range mapHits {
-		var doc map[string]any
-
-		if h, ok := hit.(map[string]any); ok {
-			doc = h
-		} else {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError("unexpected type for 'hit'", customerror.WithField("hit", hit)),
-				es.GetLogger(),
-				es.GetCounterListedFailed(),
+		hits := []any{}
+		hitsField, ok := mapResp["hits"].(map[string]any)
+		if !ok {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				"unexpected type for 'hits'",
+				customerror.WithField("hits", mapResp["hits"]),
 			)
 		}
 
-		source := doc["_source"]
-		hits = append(hits, source)
-	}
-
-	if err := storage.ParseToStruct(hits, v); err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterListedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, es, "", trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterListedFailed())
+		mapHits, ok := hitsField["hits"].([]any)
+		if !ok {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				"unexpected type for 'hits'",
+				customerror.WithField("hits", hits),
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		for _, hit := range mapHits {
+			doc, ok := hit.(map[string]any)
+			if !ok {
+				return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+					"unexpected type for 'hit'",
+					customerror.WithField("hit", hit),
+				)
+			}
 
-	// Correlates the transaction, span and log, and logs it.
-	es.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Listed.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
+			hits = append(hits, doc["_source"])
+		}
 
-	//////
-	// Metrics.
-	//////
+		if err := storage.ParseToStruct(hits, v); err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
 
-	es.GetCounterListed().Add(1)
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	return nil
+	return err
 }
 
 // Create data.
@@ -841,259 +556,153 @@ func (es *ElasticSearch) List(ctx context.Context, target string, v any, prm *li
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
 func (es *ElasticSearch) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		es.GetType(),
-		Name,
-		status.Created.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*create.Create]()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCreatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return "", customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCreatedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := create.New()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCreatedFailed())
-	}
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, es.Target())
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCreatedFailed())
-	}
-
-	//////
-	// Create.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, es, id, trgt, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCreatedFailed())
-		}
-	}
-
-	valueAsJSON, err := shared.Marshal(v)
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCreatedFailed())
-	}
-
-	reqOpts := []func(*esapi.IndexRequest){
-		es.Client.Index.WithDocumentID(id),
-		es.Client.Index.WithContext(ctx),
-	}
-
-	// Enables routing if specified.
-	if finalParam.Routing != "" {
-		reqOpts = append(reqOpts, es.Client.Index.WithRouting(finalParam.Routing))
-	}
-
-	res, err := es.Client.Index(trgt, bytes.NewReader(valueAsJSON), reqOpts...)
-	if err != nil {
-		return id, customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
-			es.GetLogger(),
-			es.GetCounterCreatedFailed(),
-		)
-	}
-
-	defer res.Body.Close()
-
-	if err := checkResponseIsError(res); err != nil {
-		return "", customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCreatedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, es, id, trgt, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterCreatedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	es.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Created.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
+	var (
+		trgt           string
+		transportError bool
 	)
 
-	//////
-	// Metrics.
-	//////
+	result, err := envelope.Run[create.Create, string](ctx, envelope.Config[create.Create]{
+		Storage:        es,
+		Adapter:        Name,
+		Status:         status.Created.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        elasticEnvelopeOptions(&trgt, options),
+		SuccessCounter: es.GetCounterCreated(),
+		FailureCounter: es.GetCounterCreatedFailed(),
+		NewParams: func() (*create.Create, error) {
+			params, err := create.New()
+			if err != nil {
+				return nil, err
+			}
 
-	es.GetCounterCreated().Add(1)
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, es.Target())
 
-	return id, nil
+			return params, err
+		},
+	}, func(ctx context.Context, params *create.Create) (envelope.Result[string], error) {
+		valueAsJSON, err := shared.Marshal(v)
+		if err != nil {
+			return envelope.Result[string]{}, err
+		}
+
+		reqOpts := []func(*esapi.IndexRequest){
+			es.Client.Index.WithDocumentID(id),
+			es.Client.Index.WithContext(ctx),
+		}
+		if params.Routing != "" {
+			reqOpts = append(reqOpts, es.Client.Index.WithRouting(params.Routing))
+		}
+
+		res, err := es.Client.Index(trgt, bytes.NewReader(valueAsJSON), reqOpts...)
+		if err != nil {
+			transportError = true
+
+			return envelope.Result[string]{}, customerror.NewFailedToError(
+				storage.OperationCreate.String(),
+				customerror.WithError(err),
+			)
+		}
+		defer res.Body.Close()
+
+		if err := checkResponseIsError(res); err != nil {
+			return envelope.Result[string]{}, err
+		}
+
+		return envelope.Result[string]{Value: id, PostHookData: v}, nil
+	})
+	if transportError {
+		return id, err
+	}
+
+	return result, err
 }
 
 // Update data.
 func (es *ElasticSearch) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			es.GetLogger(),
-			es.GetCounterUpdatedFailed(),
+	var trgt string
+
+	_, err := envelope.Run[update.Update, envelope.Void](ctx, envelope.Config[update.Update]{
+		Storage:        es,
+		Adapter:        Name,
+		Status:         status.Updated.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        elasticEnvelopeOptions(&trgt, options),
+		RequiresID:     true,
+		SuccessCounter: es.GetCounterUpdated(),
+		FailureCounter: es.GetCounterUpdatedFailed(),
+		NewParams: func() (*update.Update, error) {
+			params, err := update.New()
+			if err != nil {
+				return nil, err
+			}
+
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, es.Target())
+
+			return params, err
+		},
+	}, func(ctx context.Context, params *update.Update) (envelope.Result[envelope.Void], error) {
+		valueAsJSON, err := shared.Marshal(v)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
+
+		reqOpts := []func(*esapi.UpdateRequest){es.Client.Update.WithContext(ctx)}
+		if params.Routing != "" {
+			reqOpts = append(reqOpts, es.Client.Update.WithRouting(params.Routing))
+		}
+
+		res, err := es.Client.Update(
+			trgt,
+			id,
+			bytes.NewReader(fmt.Appendf(nil, `{"doc":%s}`, valueAsJSON)),
+			reqOpts...,
 		)
-	}
-
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		es.GetType(),
-		Name,
-		status.Updated.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*update.Update]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterUpdatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterUpdatedFailed())
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationUpdate.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
+		defer res.Body.Close()
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := update.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterUpdatedFailed())
-	}
-
-	if prm != nil {
-		finalParam = prm
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, es.Target())
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterUpdatedFailed())
-	}
-
-	//////
-	// Update.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, es, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterUpdatedFailed())
+		if err := checkResponseIsError(res); err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
 
-	valueAsJSON, err := shared.Marshal(v)
-	if err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterUpdatedFailed())
-	}
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	reqOpts := []func(*esapi.UpdateRequest){
-		es.Client.Update.WithContext(ctx),
-	}
-
-	// Enables routing if specified.
-	if finalParam.Routing != "" {
-		reqOpts = append(reqOpts, es.Client.Update.WithRouting(finalParam.Routing))
-	}
-
-	// Call client Update API using esapi.Update().
-	res, err := es.Client.Update(
-		trgt,
-		id,
-		bytes.NewReader(fmt.Appendf(nil, `{"doc":%s}`, valueAsJSON)),
-		reqOpts...,
-	)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
-			es.GetLogger(),
-			es.GetCounterUpdatedFailed(),
-		)
-	}
-
-	defer res.Body.Close()
-
-	if err := checkResponseIsError(res); err != nil {
-		return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterUpdatedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, es, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, es.GetLogger(), es.GetCounterUpdatedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	es.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Updated.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	es.GetCounterUpdated().Add(1)
-
-	return nil
+	return err
 }
 
 // GetClient returns the client.
 func (es *ElasticSearch) GetClient() any {
 	return es.Client
+}
+
+// Close releases the resources held by the storage.
+func (es *ElasticSearch) Close() error {
+	var closeErr error
+
+	es.closeOnce.Do(func() {
+		// The client has no socket handle of its own. Close marks its HTTP
+		// transport closed, stops discovery, and drains its connection pool.
+		closeErr = es.Client.Close(context.Background())
+
+		// A caller-supplied HTTP transport remains owned by the adapter and may
+		// retain keep-alive connections after the ES transport shuts down.
+		if closer, ok := es.Config.Transport.(interface{ CloseIdleConnections() }); ok {
+			closer.CloseIdleConnections()
+		}
+	})
+
+	return closeErr
 }
 
 //////

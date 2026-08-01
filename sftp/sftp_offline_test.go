@@ -6,19 +6,24 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"expvar"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	pkgsftp "github.com/pkg/sftp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thalesfsp/dal/v2/storage"
+	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
+	"github.com/thalesfsp/params/v2/customsort"
 	"github.com/thalesfsp/params/v2/delete"
 	"github.com/thalesfsp/params/v2/list"
 	"github.com/thalesfsp/params/v2/retrieve"
@@ -44,6 +49,157 @@ var errHookBoom = errors.New("hook boom")
 type testDoc struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+type sftpBulkDocument struct {
+	Value string `json:"value"`
+}
+
+func sftpBulkItems(dir string, count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for index := range items {
+		items[index] = storage.BulkItem{
+			ID:    filepath.Join(dir, fmt.Sprintf("item-%d.json", index)),
+			Value: sftpBulkDocument{Value: fmt.Sprintf("value-%d", index)},
+		}
+	}
+
+	return items
+}
+
+func preserveSFTPBulkMetrics(t *testing.T, str *SFTP) {
+	t.Helper()
+
+	counters := []*expvar.Int{
+		str.GetCounterCreated(),
+		str.GetCounterCreatedFailed(),
+		str.GetCounterRetrieved(),
+		str.GetCounterRetrievedFailed(),
+	}
+	before := make([]int64, len(counters))
+	for index, counter := range counters {
+		before[index] = counter.Value()
+	}
+
+	t.Cleanup(func() {
+		for index, counter := range counters {
+			counter.Add(before[index] - counter.Value())
+		}
+	})
+}
+
+func TestSFTPBulkCreateHappyPathManyItems(t *testing.T) {
+	str := newOfflineStorage(t)
+	preserveSFTPBulkMetrics(t, str)
+	items := sftpBulkItems(t.TempDir(), 20)
+
+	result, err := str.BulkCreate(t.Context(), "unused", items, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(items), len(result.Succeeded))
+	require.Empty(t, result.Failures)
+	require.False(t, result.Stopped)
+
+	for index, item := range items {
+		require.Equal(t, index, result.Succeeded[index])
+
+		var got sftpBulkDocument
+		require.NoError(t, str.Retrieve(t.Context(), item.ID, item.ID, &got, nil))
+		require.Equal(t, item.Value, got)
+	}
+}
+
+func TestSFTPBulkCreateEmptyInput(t *testing.T) {
+	str := newOfflineStorage(t)
+	preserveSFTPBulkMetrics(t, str)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	result, err := str.BulkCreate(ctx, "unused", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, storage.BulkResult{}, result)
+}
+
+func TestSFTPBulkCreateSingleItem(t *testing.T) {
+	str := newOfflineStorage(t)
+	preserveSFTPBulkMetrics(t, str)
+	items := sftpBulkItems(t.TempDir(), 1)
+
+	result, err := str.BulkCreate(t.Context(), "unused", items, nil)
+	require.NoError(t, err)
+	require.Equal(t, []int{0}, result.Succeeded)
+
+	var got sftpBulkDocument
+	require.NoError(t, str.Retrieve(t.Context(), items[0].ID, items[0].ID, &got, nil))
+	require.Equal(t, items[0].Value, got)
+}
+
+func TestSFTPBulkCreatePartialFailurePreservesOriginalIndices(t *testing.T) {
+	str := newOfflineStorage(t)
+	preserveSFTPBulkMetrics(t, str)
+	items := sftpBulkItems(t.TempDir(), 20)
+	rejected := errors.New("rejected by sftp bulk test")
+	preHook := func(_ context.Context, _ storage.IStorage, id, _ string, _ any, _ *create.Create) error {
+		if id == items[17].ID {
+			return rejected
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(t.Context(), "unused", items, nil, storage.WithPreHook(preHook))
+	require.Error(t, err)
+	require.False(t, result.Stopped)
+	require.Len(t, result.Failures, 1)
+	if failureIndices := []int{result.Failures[0].Index}; !reflect.DeepEqual(failureIndices, []int{17}) {
+		t.Fatalf("failure indices = %v, want [17]", failureIndices)
+	}
+	require.ErrorIs(t, result.Failures[0].Err, rejected)
+
+	for index, item := range items {
+		_, statErr := os.Stat(item.ID)
+		if index == 17 {
+			require.ErrorIs(t, statErr, os.ErrNotExist)
+
+			continue
+		}
+
+		require.NoError(t, statErr, "item %d", index)
+	}
+}
+
+func TestSFTPBulkCreateContextCancellationMidBatch(t *testing.T) {
+	str := newOfflineStorage(t)
+	preserveSFTPBulkMetrics(t, str)
+	items := sftpBulkItems(t.TempDir(), 24)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	var completed atomic.Int32
+	postHook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+		if completed.Add(1) == 3 {
+			cancel()
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(ctx, "unused", items, nil, storage.WithPostHook(postHook))
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, result.Stopped)
+	require.NotEmpty(t, result.Succeeded)
+	require.Equal(t, len(items), len(result.Succeeded)+len(result.Failures))
+
+	succeeded := make(map[int]bool, len(result.Succeeded))
+	for _, index := range result.Succeeded {
+		succeeded[index] = true
+	}
+	for index, item := range items {
+		_, statErr := os.Stat(item.ID)
+		require.Equal(t, statErr == nil, succeeded[index], "persisted/report mismatch for item %d", index)
+	}
+	for _, failure := range result.Failures {
+		require.ErrorIs(t, failure.Err, context.Canceled)
+	}
 }
 
 type testSSHServer struct {
@@ -251,6 +407,44 @@ func mustCreateFile(t *testing.T, str *SFTP, trgt string, v any) {
 //////
 // Tests.
 //////
+
+func TestClose_Offline(t *testing.T) {
+	t.Run("idempotent", func(t *testing.T) {
+		str := newOfflineStorage(t)
+
+		require.NoError(t, str.Close())
+		assert.NoError(t, str.Close())
+	})
+
+	t.Run("concurrent", func(t *testing.T) {
+		str := newOfflineStorage(t)
+
+		const goroutines = 8
+
+		start := make(chan struct{})
+		errs := make(chan error, goroutines)
+
+		var wg sync.WaitGroup
+		wg.Add(goroutines)
+
+		for range goroutines {
+			go func() {
+				defer wg.Done()
+				<-start
+
+				errs <- str.Close()
+			}()
+		}
+
+		close(start)
+		wg.Wait()
+		close(errs)
+
+		for err := range errs {
+			require.NoError(t, err)
+		}
+	})
+}
 
 // New must work against a real (in-process) server with both documented addr
 // forms, and must register the singleton.
@@ -553,39 +747,199 @@ func TestSFTP_Offline_List(t *testing.T) {
 	mustCreateFile(t, str, filepath.Join(dir, "b.json"), &testDoc{ID: "b"})
 	require.NoError(t, str.Client.Mkdir(filepath.Join(dir, "subdir")))
 
-	t.Run("nil params lists files only", func(t *testing.T) {
-		var keys ResponseListKeys
+	t.Run("nil params lists documents", func(t *testing.T) {
+		var docs ResponseList[testDoc]
 
-		require.NoError(t, str.List(ctx, dir, &keys, nil))
-		assert.ElementsMatch(t, []string{"a.json", "b.json"}, keys.Keys)
+		require.NoError(t, str.List(ctx, dir, &docs, nil))
+		assert.ElementsMatch(t, []testDoc{{ID: "a"}, {ID: "b"}}, docs.Items)
 	})
 
 	t.Run("non-nil params", func(t *testing.T) {
-		var keys ResponseListKeys
+		var docs ResponseList[testDoc]
 
-		require.NoError(t, str.List(ctx, dir, &keys, listParam))
-		assert.ElementsMatch(t, []string{"a.json", "b.json"}, keys.Keys)
+		require.NoError(t, str.List(ctx, dir, &docs, listParam))
+		assert.Equal(t, []testDoc{{ID: "a"}, {ID: "b"}}, docs.Items)
 	})
 
 	t.Run("empty directory", func(t *testing.T) {
 		empty := t.TempDir()
 
-		var keys ResponseListKeys
+		var docs ResponseList[testDoc]
 
-		require.NoError(t, str.List(ctx, empty, &keys, nil))
-		assert.Empty(t, keys.Keys)
+		require.NoError(t, str.List(ctx, empty, &docs, nil))
+		assert.Empty(t, docs.Items)
 	})
 
 	t.Run("missing directory", func(t *testing.T) {
-		var keys ResponseListKeys
+		var docs ResponseList[testDoc]
 
-		require.Error(t, str.List(ctx, filepath.Join(dir, "nope"), &keys, nil))
+		require.Error(t, str.List(ctx, filepath.Join(dir, "nope"), &docs, nil))
 	})
 
 	t.Run("missing target", func(t *testing.T) {
-		var keys ResponseListKeys
+		var docs ResponseList[testDoc]
 
-		require.Error(t, str.List(ctx, "", &keys, nil))
+		require.Error(t, str.List(ctx, "", &docs, nil))
+	})
+}
+
+type sftpListParamsDoc struct {
+	ID    string `json:"id"`
+	Group string `json:"group"`
+	Rank  int    `json:"rank"`
+	Drop  string `json:"drop"`
+}
+
+func TestSFTP_Offline_ListParams(t *testing.T) {
+	ctx := t.Context()
+	str := newOfflineStorage(t)
+	dir := t.TempDir()
+
+	for i := range 13 {
+		doc := &sftpListParamsDoc{
+			ID:    fmt.Sprintf("doc-%02d", i),
+			Group: []string{"b", "a"}[i%2],
+			Rank:  i,
+			Drop:  "drop",
+		}
+		mustCreateFile(t, str, filepath.Join(dir, "params-"+doc.ID+".json"), doc)
+	}
+
+	listDocs := func(t *testing.T, prm *list.List) []sftpListParamsDoc {
+		t.Helper()
+
+		var got ResponseList[sftpListParamsDoc]
+		require.NoError(t, str.List(ctx, dir, &got, prm))
+
+		return got.Items
+	}
+
+	t.Run("sort ascending and descending", func(t *testing.T) {
+		asc := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+		})
+		require.Len(t, asc, 10)
+		assert.Equal(t, 0, asc[0].Rank)
+		assert.Equal(t, 9, asc[9].Rank)
+
+		desc := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Desc}},
+		})
+		require.Len(t, desc, 10)
+		assert.Equal(t, 12, desc[0].Rank)
+		assert.Equal(t, 3, desc[9].Rank)
+	})
+
+	t.Run("literal sort params inherit default limit and agree with pre-hook", func(t *testing.T) {
+		var (
+			got       ResponseList[sftpListParamsDoc]
+			hookLimit int
+		)
+
+		err := str.List(ctx, dir, &got, &list.List{
+			Sort: customsort.SortSlice{{"rank", customsort.Asc}},
+		}, storage.WithPreHook(func(
+			_ context.Context,
+			_ storage.IStorage,
+			_, _ string,
+			_ any,
+			params *list.List,
+		) error {
+			hookLimit = params.Limit
+
+			return nil
+		}))
+		require.NoError(t, err)
+		require.Equal(t, 10, hookLimit)
+		require.Len(t, got.Items, hookLimit)
+	})
+
+	t.Run("multi-key sort breaks ties with second key", func(t *testing.T) {
+		got := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort: customsort.SortSlice{
+				{"group", customsort.Asc},
+				{"rank", customsort.Desc},
+			},
+		})
+		require.Len(t, got, 10)
+		assert.Equal(t, "a", got[0].Group)
+		assert.Equal(t, 11, got[0].Rank)
+		assert.Equal(t, 9, got[1].Rank)
+		assert.Equal(t, "b", got[6].Group)
+		assert.Equal(t, 12, got[6].Rank)
+	})
+
+	t.Run("offset alone", func(t *testing.T) {
+		assert.Len(t, listDocs(t, &list.List{Search: "params-*", Offset: 3}), 10)
+	})
+
+	t.Run("limit alone", func(t *testing.T) {
+		assert.Len(t, listDocs(t, &list.List{Search: "params-*", Limit: 4}), 4)
+	})
+
+	t.Run("offset and limit", func(t *testing.T) {
+		got := listDocs(t, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+			Offset: 3,
+			Limit:  4,
+		})
+		require.Len(t, got, 4)
+		assert.Equal(t, []int{3, 4, 5, 6}, []int{got[0].Rank, got[1].Rank, got[2].Rank, got[3].Rank})
+	})
+
+	t.Run("fields projection", func(t *testing.T) {
+		var got ResponseList[map[string]any]
+		require.NoError(t, str.List(ctx, dir, &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
+			Fields: []string{"id"},
+		}))
+		require.Len(t, got.Items, 10)
+		assert.Equal(t, map[string]any{"id": "doc-00"}, got.Items[0])
+	})
+
+	t.Run("combined", func(t *testing.T) {
+		var got ResponseList[map[string]any]
+		require.NoError(t, str.List(ctx, dir, &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", customsort.Desc}},
+			Offset: 2,
+			Limit:  3,
+			Fields: []string{"id"},
+		}))
+		assert.Equal(t, []map[string]any{
+			{"id": "doc-10"},
+			{"id": "doc-09"},
+			{"id": "doc-08"},
+		}, got.Items)
+	})
+
+	t.Run("list.New default limits to ten", func(t *testing.T) {
+		prm, err := list.New()
+		require.NoError(t, err)
+		prm.Search = "params-*"
+
+		assert.Len(t, listDocs(t, prm), 10)
+	})
+
+	t.Run("nil params leave behavior unchanged", func(t *testing.T) {
+		assert.Len(t, listDocs(t, nil), 13)
+	})
+
+	t.Run("invalid sort order uses normal error path", func(t *testing.T) {
+		failedBefore := str.GetCounterListedFailed().Value()
+
+		var got ResponseList[sftpListParamsDoc]
+		err := str.List(ctx, dir, &got, &list.List{
+			Search: "params-*",
+			Sort:   customsort.SortSlice{{"rank", "sideways"}},
+		})
+		require.Error(t, err)
+		assert.Equal(t, failedBefore+1, str.GetCounterListedFailed().Value())
 	})
 }
 
@@ -654,7 +1008,7 @@ func TestSFTP_Offline_Hooks(t *testing.T) {
 	// List.
 	//////
 
-	var keys ResponseListKeys
+	var keys ResponseList[testDoc]
 
 	require.NoError(t, str.List(ctx, dir, &keys, nil, hookOptions[*list.List](false, false)...))
 	require.Error(t, str.List(ctx, dir, &keys, nil, hookOptions[*list.List](true, false)...))

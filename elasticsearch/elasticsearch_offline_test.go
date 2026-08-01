@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,8 +16,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thalesfsp/customerror"
-	"github.com/thalesfsp/dal/v2/internal/shared"
-	"github.com/thalesfsp/dal/v2/storage"
+	"github.com/thalesfsp/dal/v3/internal/shared"
+	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/customsort"
@@ -23,6 +26,219 @@ import (
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
 )
+
+type elasticsearchBulkTestDocument struct {
+	Value string `json:"value"`
+}
+
+func elasticsearchBulkTestItems(count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for i := range items {
+		items[i] = storage.BulkItem{
+			ID:    fmt.Sprintf("bulk-item-%d", i),
+			Value: elasticsearchBulkTestDocument{Value: fmt.Sprintf("value-%d", i)},
+		}
+	}
+
+	return items
+}
+
+func TestElasticsearchPrepareChunkErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	es := &ElasticSearch{}
+	prm := &create.Create{}
+	options, err := storage.NewOptions[*create.Create]()
+	require.NoError(t, err)
+	rejected := errors.New("Elasticsearch pre-hook rejected item")
+	options.PreHookFunc = func(
+		_ context.Context,
+		adapter storage.IStorage,
+		id string,
+		target string,
+		_ any,
+		gotPrm *create.Create,
+	) error {
+		assert.Same(t, es, adapter)
+		assert.Equal(t, "documents", target)
+		assert.Same(t, prm, gotPrm)
+		if id == "reject" {
+			return rejected
+		}
+
+		return nil
+	}
+	chunk := []storage.Indexed[storage.BulkItem]{
+		{Index: 2, Item: storage.BulkItem{ID: "", Value: "missing"}},
+		{Index: 7, Item: storage.BulkItem{ID: "reject", Value: "rejected"}},
+		{Index: 12, Item: storage.BulkItem{ID: "unmarshalable", Value: make(chan int)}},
+		{Index: 19, Item: storage.BulkItem{ID: "accepted", Value: map[string]string{"value": "ok"}}},
+	}
+	result := storage.BulkResult{}
+
+	prepared, stoppedAt := es.elasticsearchPrepareChunk(
+		t.Context(),
+		"documents",
+		chunk,
+		prm,
+		options,
+		&result,
+	)
+	assert.Equal(t, -1, stoppedAt)
+	require.Len(t, prepared, 1)
+	assert.Equal(t, 19, prepared[0].indexed.Index)
+	assert.Equal(t, []byte(`{"value":"ok"}`), prepared[0].body)
+	require.Len(t, result.Failures, 3)
+	assert.Equal(t, []int{2, 7, 12}, []int{
+		result.Failures[0].Index,
+		result.Failures[1].Index,
+		result.Failures[2].Index,
+	})
+	assert.Equal(t, "id required", result.Failures[0].Err.Error())
+	assert.ErrorIs(t, result.Failures[1].Err, rejected)
+	assert.Equal(
+		t,
+		"failed to "+"to marshal. Original Error: json: unsupported type: chan int",
+		result.Failures[2].Err.Error(),
+	)
+	var unsupportedType *json.UnsupportedTypeError
+	assert.ErrorAs(t, result.Failures[2].Err, &unsupportedType)
+	assert.Equal(t, reflect.TypeFor[chan int](), unsupportedType.Type)
+
+	canceledCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	canceledResult := storage.BulkResult{}
+	prepared, stoppedAt = es.elasticsearchPrepareChunk(
+		canceledCtx,
+		"documents",
+		chunk[3:],
+		prm,
+		options,
+		&canceledResult,
+	)
+	assert.Empty(t, prepared)
+	assert.Equal(t, 0, stoppedAt)
+	assert.Empty(t, canceledResult.Failures)
+}
+
+func TestElasticsearchFailPreparedPreservesEveryOriginalIndex(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("bulk response could not be decoded")
+	prepared := []elasticsearchBulkDocument{
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 3, Item: storage.BulkItem{ID: "three"}}},
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 17, Item: storage.BulkItem{ID: "seventeen"}}},
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 104, Item: storage.BulkItem{ID: "one-oh-four"}}},
+	}
+	result := storage.BulkResult{Succeeded: []int{1}}
+
+	elasticsearchFailPrepared(&result, prepared, cause)
+
+	assert.Equal(t, []int{1}, result.Succeeded)
+	require.Len(t, result.Failures, len(prepared))
+	for i, failure := range result.Failures {
+		assert.Equal(t, prepared[i].indexed.Index, failure.Index)
+		assert.ErrorIs(t, failure.Err, cause)
+	}
+}
+
+func TestElasticSearchOffline_BulkCreate(t *testing.T) {
+	t.Run("happy path crosses chunk limit and reads back", func(t *testing.T) {
+		es, _, srv := newTestES(t, "bulk-index")
+		items := elasticsearchBulkTestItems(elasticsearchBulkChunkLimit*2 + 5)
+
+		result, err := es.BulkCreate(t.Context(), "", items, nil)
+		require.NoError(t, err)
+		assert.True(t, result.AllSucceeded())
+		assert.False(t, result.Stopped)
+		require.Len(t, result.Succeeded, len(items))
+		assert.Equal(t, 3, srv.CountPath(http.MethodPost, "/bulk-index/_bulk"))
+
+		for index, item := range items {
+			assert.Equal(t, index, result.Succeeded[index])
+
+			var got elasticsearchBulkTestDocument
+			require.NoError(t, es.Retrieve(t.Context(), item.ID, "", &got, nil))
+			assert.Equal(t, item.Value, got)
+		}
+	})
+
+	t.Run("empty input succeeds even with canceled context", func(t *testing.T) {
+		es, _, _ := newTestES(t, "bulk-empty")
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		result, err := es.BulkCreate(ctx, "", nil, nil)
+		require.NoError(t, err)
+		assert.Equal(t, storage.BulkResult{}, result)
+	})
+
+	t.Run("single item", func(t *testing.T) {
+		es, _, _ := newTestES(t, "bulk-single")
+		items := elasticsearchBulkTestItems(1)
+
+		result, err := es.BulkCreate(t.Context(), "", items, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []int{0}, result.Succeeded)
+
+		var got elasticsearchBulkTestDocument
+		require.NoError(t, es.Retrieve(t.Context(), items[0].ID, "", &got, nil))
+		assert.Equal(t, items[0].Value, got)
+	})
+
+	t.Run("HTTP 200 per-item errors preserve original indices", func(t *testing.T) {
+		es, store, _ := newTestES(t, "bulk-partial")
+		items := elasticsearchBulkTestItems(elasticsearchBulkChunkLimit + 35)
+		store.rejectIDs[items[7].ID] = http.StatusBadRequest
+		store.rejectIDs[items[127].ID] = http.StatusTooManyRequests
+
+		result, err := es.BulkCreate(t.Context(), "", items, nil)
+		require.Error(t, err)
+		require.Len(t, result.Failures, 2)
+		assert.Equal(t, 7, result.Failures[0].Index)
+		assert.Equal(t, 127, result.Failures[1].Index)
+		assert.False(t, result.Stopped)
+		assert.Len(t, result.Succeeded, len(items)-2)
+
+		for index, item := range items {
+			var got elasticsearchBulkTestDocument
+			retrieveErr := es.Retrieve(t.Context(), item.ID, "", &got, nil)
+			if index == 7 || index == 127 {
+				require.Error(t, retrieveErr, "failed item %d was written", index)
+
+				continue
+			}
+			require.NoError(t, retrieveErr, "successful item %d was not written", index)
+			assert.Equal(t, item.Value, got)
+		}
+	})
+
+	t.Run("context cancellation keeps completed chunk", func(t *testing.T) {
+		es, _, _ := newTestES(t, "bulk-cancel")
+		items := elasticsearchBulkTestItems(elasticsearchBulkChunkLimit + 5)
+		ctx, cancel := context.WithCancel(t.Context())
+		postHook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+			cancel()
+
+			return nil
+		}
+
+		result, err := es.BulkCreate(ctx, "", items, nil, storage.WithPostHook(postHook))
+		require.ErrorIs(t, err, context.Canceled)
+		assert.True(t, result.Stopped)
+		require.Len(t, result.Succeeded, elasticsearchBulkChunkLimit)
+		require.Len(t, result.Failures, 5)
+		for index := range elasticsearchBulkChunkLimit {
+			assert.Equal(t, index, result.Succeeded[index])
+			var got elasticsearchBulkTestDocument
+			require.NoError(t, es.Retrieve(t.Context(), items[index].ID, "", &got, nil))
+		}
+		for offset, failure := range result.Failures {
+			assert.Equal(t, elasticsearchBulkChunkLimit+offset, failure.Index)
+			assert.ErrorIs(t, failure.Err, context.Canceled)
+		}
+	})
+}
 
 //////
 // Offline (no ENVIRONMENT gating) tests exercising the real ElasticSearch
@@ -35,6 +251,48 @@ var (
 	errBranchPre  = errors.New("pre-hook boom")
 	errBranchPost = errors.New("post-hook boom")
 )
+
+type closeTrackingRoundTripper struct {
+	next http.RoundTripper
+
+	mu         sync.Mutex
+	closeCalls int
+}
+
+func (t *closeTrackingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.next.RoundTrip(req)
+}
+
+func (t *closeTrackingRoundTripper) CloseIdleConnections() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.closeCalls++
+
+	if closer, ok := t.next.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
+func (t *closeTrackingRoundTripper) CloseCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.closeCalls
+}
+
+type failingCloseESTransport struct {
+	perform  func(*http.Request) (*http.Response, error)
+	closeErr error
+}
+
+func (t *failingCloseESTransport) Perform(req *http.Request) (*http.Response, error) {
+	return t.perform(req)
+}
+
+func (t *failingCloseESTransport) Close(context.Context) error {
+	return t.closeErr
+}
 
 // newTestES starts a memStore-backed fake server and returns a connected
 // ElasticSearch storage pointed at it, along with the store so tests can
@@ -51,6 +309,71 @@ func newTestES(t *testing.T, index string) (*ElasticSearch, *memStore, *fakeServ
 	require.NotNil(t, es.Client)
 
 	return es, store, srv
+}
+
+func TestElasticSearchOffline_Close(t *testing.T) {
+	newStorage := func(t *testing.T) (*ElasticSearch, *closeTrackingRoundTripper) {
+		t.Helper()
+
+		srv := newFakeServer(t, infoRoute(nil))
+		baseTransport, ok := http.DefaultTransport.(*http.Transport)
+		require.True(t, ok)
+
+		transport := &closeTrackingRoundTripper{
+			next: baseTransport.Clone(),
+		}
+
+		es, err := New(t.Context(), Config{
+			Addresses: []string{srv.URL},
+			Transport: transport,
+		})
+		require.NoError(t, err)
+
+		return es, transport
+	}
+
+	t.Run("closes client and idle connections and is idempotent", func(t *testing.T) {
+		es, transport := newStorage(t)
+
+		require.NoError(t, es.Close())
+		require.NoError(t, es.Close())
+		assert.Equal(t, 1, transport.CloseCalls(), "Close must release the HTTP transport's idle connections")
+
+		_, err := es.Client.Info()
+		require.Error(t, err, "operation after Close must fail because client is closed")
+	})
+
+	t.Run("concurrent calls", func(t *testing.T) {
+		es, transport := newStorage(t)
+
+		const callers = 8
+
+		errs := make(chan error, callers)
+		for range callers {
+			go func() {
+				errs <- es.Close()
+			}()
+		}
+
+		for range callers {
+			require.NoError(t, <-errs)
+		}
+
+		assert.Equal(t, 1, transport.CloseCalls(), "idle connections must be closed exactly once")
+	})
+
+	t.Run("propagates client close error once", func(t *testing.T) {
+		es, _ := newStorage(t)
+		closeErr := errors.New("elasticsearch transport close failed")
+		transport := es.Client.Transport
+		es.Client.Transport = &failingCloseESTransport{
+			perform:  transport.Perform,
+			closeErr: closeErr,
+		}
+
+		require.ErrorIs(t, es.Close(), closeErr)
+		require.NoError(t, es.Close())
+	})
 }
 
 //////
@@ -343,13 +666,11 @@ func TestCount_TargetResolutionFailure(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestCount_BuildQueryError(t *testing.T) {
+func TestCount_EmptySearchKeepsDefault(t *testing.T) {
 	es, _, _ := newTestES(t, "idx")
 
-	// Bypasses count.New()'s `Search required` validation by constructing
-	// the struct directly, exercising buildQuery's own empty-search guard.
 	_, err := es.Count(t.Context(), "idx", &count.Count{Search: ""})
-	require.Error(t, err)
+	require.NoError(t, err)
 }
 
 func TestCount_TransportError(t *testing.T) {
@@ -654,13 +975,13 @@ func TestList_AnyValueListAny(t *testing.T) {
 	assert.Contains(t, srv.Last().Body, `"track_total_hits": true`)
 }
 
-func TestList_BuildQueryError(t *testing.T) {
+func TestList_EmptySearchKeepsDefault(t *testing.T) {
 	es, _, _ := newTestES(t, "idx")
 
 	var items []shared.TestDataS
 
 	err := es.List(t.Context(), "idx", &items, &list.List{Search: ""})
-	require.Error(t, err)
+	require.NoError(t, err)
 }
 
 func TestList_OptionError(t *testing.T) {

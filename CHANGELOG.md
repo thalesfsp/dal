@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Project Roadmap
 
-- [ ] Create and Update should allow to pass more than one object per time (Bulk Create and Update)
+- [ ] Add `BulkUpdate`; `BulkCreate` ships in v3.0.0.
 
 ## [Unreleased]
 ### Fixed
@@ -64,40 +64,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on write; a missing bucket is an error on read rather than an empty result,
   so a typo in a target cannot masquerade as an empty store. `Delete` stays
   idempotent on a missing bucket, matching `file`, `sftp` and `memory`.
-  `List` walks bbolt's cursor, which yields keys in byte order, making
-  `Limit` meaningful — most non-SQL adapters ignore it.
+  `List` walks bbolt's cursor, which yields keys in byte order. The v3 list
+  path collects all matches before applying sort, pagination and projection.
   `Close` matters more here than elsewhere: bbolt holds an exclusive lock on
   the database file, so a leaked handle blocks every later `Open` of the same
   path.
 - Runnable examples for `bolt` and `memory`, checked by `go test` against
-  their declared output. These are the only two storages that need no live
-  backend, and so the only two where an example can execute.
+  their declared output.
 - `sftp.Close` releases the SSH transport as well as the SFTP channel; the
   adapter retains it as `SFTP.Conn`. Closing only `Client` left the TCP+SSH
   session open for the lifetime of the process.
-- Offline test suites for every package — no Docker, no network, no new
-  dependencies. Every package is now at or above 90% statement coverage
-  (previously as low as 0%), all running under `-race`:
-
-  | Package | Before | After |
-  |---|---|---|
-  | `storage` | 50.2% | 99.5% |
-  | `internal/logging` | 0% | 100% |
-  | `internal/shared` | 39.4% | 95.7% |
-  | `internal/customapm` | 69.8% | 95.3% |
-  | `elasticsearch` | 14.5% | 94.7% |
-  | `sqlite` | 64.2% | 93.8% |
-  | `redis` | 0% | 93.5% |
-  | `postgres` | 6.6% | 93.4% |
-  | `mysql` | 6.4% | 93.2% |
-  | `s3` | 0% | 93.1% |
-  | `dynamodb` | 18.4% | 92.4% |
-  | `sftp` | 4.3% | 92.0% |
-  | `file` | 63.5% | 91.9% |
-  | `memory` | 73.3% | 91.7% |
-  | `mongodb` | 0% | 90.7% |
-
-  The backends are faked in-process: an SSH server with the SFTP subsystem
+- Offline test suites for every adapter and the core packages, all running
+  under `-race` without an external backend. The backends are faked
+  in-process: an SSH server with the SFTP subsystem
   attached, a RESP2 server implementing exactly the commands the redis
   adapter sends, a mongo mock deployment driving the real driver, an
   Elasticsearch server with an in-memory index emulator, S3 and DynamoDB
@@ -109,6 +88,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `memory.List` builds its JSON payload with a `strings.Builder` instead of
   repeated string concatenation (was O(n²) in the number of matched keys).
+
+## [3.0.0] - 2026-07-31
+### Breaking
+- The module and all package imports moved to the `/v3` major-version path.
+- `memory`, `file`, `sftp`, `bolt` and `redis` now honor `List`'s `Sort`,
+  `Limit`, `Offset` and `Fields` parameters. A `list.New()` value defaults
+  `Limit` to 10, so calls that previously returned every record can now return
+  ten. `file`, `redis` and `sftp` list responses changed from key lists to
+  decoded `ResponseList[T]` documents.
+- Caller parameters are merged over validated operation defaults instead of
+  replacing them wholesale. Non-zero caller fields now retain defaults for
+  fields the caller did not set. The five in-process `List` post-processors
+  currently use the original params for `Sort`, `Limit`, `Offset` and `Fields`;
+  callers must pass a `list.New()` value or set those fields explicitly.
+- `Close() error` is now part of `storage.IStorage`; `storage.ICloser` and the
+  `storage.Close` helper were removed. Third-party implementations must add an
+  idempotent `Close` method.
+- `BulkCreate` was added to `storage.IStorage`. Third-party implementations
+  must implement the method even if they return
+  `storage.ErrBulkCreateNotImplemented`.
+- `s3` and `dynamodb` migrated from `aws-sdk-go` v1 to
+  `aws-sdk-go-v2`. Their exported `Config` aliases and DynamoDB helper types
+  now have SDK v2 shapes.
+- `mongodb` migrated from `mongo-driver` v1 to v2. Its exported `Config` alias
+  now refers to the v2 driver's `options.ClientOptions`.
+- `dynamodb.New`, `NewWithTable` and `NewWithDynamicTable` accept functional
+  options and apply them before validation.
+- `redis.Retrieve` returns Not Found for a stored zero-byte value instead of
+  succeeding without decoding anything.
+
+### Added
+- A documented `BulkCreate` partial-failure contract, original-input-index
+  result types, and a chunking helper. All twelve adapters implement it: native
+  multi-row `INSERT` for `mysql`/`postgres`/`sqlite`, unordered `InsertMany` for
+  `mongodb`, `_bulk` for `elasticsearch`, `BatchWriteItem` with
+  `UnprocessedItems` retry for `dynamodb`, and pipelining for `redis`.
+  `bolt` batches writes in bounded bbolt transactions; `file` and `memory`
+  loop over single writes, while `s3` and `sftp` do so with bounded
+  concurrency. Failures are reported by original input index, and that index
+  survives internal chunking, retries and bounded concurrency.
+- Real, idempotent `Close` implementations for all twelve adapters, including
+  both the SFTP channel and SSH transport for `sftp` and the database handle
+  for `bolt`.
+
+### Changed
+- All six non-bulk operation methods in all twelve adapters now use the generic
+  `internal/envelope.Run[P,R]` helper for params, target resolution, hooks,
+  tracing, logging, counters and error reporting. Cross-adapter regression
+  tests added before the refactor pin that observable behavior; additional bulk
+  tests cover aggregate error unwrapping and pending-item failure fan-out.
+
+### Fixed
+- `bolt.List` no longer truncates its cursor at `Limit` before sorting. It now
+  sorts the full matched set before pagination, rather than returning the N
+  records it happened to encounter instead of the N smallest or largest.
+- Functional options passed to DynamoDB constructors can satisfy required
+  fields because they run before validation; invalid option results are still
+  rejected.
+- Redis distinguishes a zero-byte stored value from valid non-empty JSON such
+  as `{}`, `[]`, `""` and `null`.
+
+### Security
+- `go.opentelemetry.io/otel/sdk` was bumped to v1.43.0 to fix the BSD `kenv`
+  PATH-hijack issue. That security commit shipped in v2.2.3, before the v3
+  branch diverged, so v3 retains the patched dependency baseline.
+- Migrating away from `aws-sdk-go` v1 removes the affected S3 Crypto code for
+  `GO-2022-0646` (CBC padding oracle) and `GO-2022-0635` (in-band key
+  negotiation) from the dependency graph.
 
 ## [2.2.0] - 2026-07-05
 ### Changed

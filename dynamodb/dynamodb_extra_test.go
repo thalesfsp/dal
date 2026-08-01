@@ -4,17 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thalesfsp/dal/v2/storage"
+	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/customsort"
@@ -24,12 +28,8 @@ import (
 	"github.com/thalesfsp/params/v2/update"
 )
 
-// TestMain clears AWS_CA_BUNDLE once for the whole binary. The sandbox's
-// outbound-proxy setup exports it; session.New picks it up regardless of
-// what's in our *aws.Config and then requires HTTPClient.Transport to be a
-// concrete *http.Transport to install it, which dynamoLocalTransport (by
-// design: it never dials out) is not. Nothing in this package's tests makes
-// a real TLS connection, so the custom bundle is moot.
+// TestMain clears AWS_CA_BUNDLE once for the whole binary. Nothing in this
+// package's tests makes a real TLS connection, so the custom bundle is moot.
 func TestMain(m *testing.M) {
 	os.Unsetenv("AWS_CA_BUNDLE")
 	os.Exit(m.Run())
@@ -46,8 +46,214 @@ type dynamoDoc struct {
 	Version string `dynamodbav:"version"`
 }
 
+func dynamoBulkTestItems(count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for i := range items {
+		items[i] = storage.BulkItem{
+			ID: fmt.Sprintf("bulk-item-%d", i),
+			Value: dynamoDoc{
+				Name:    fmt.Sprintf("value-%d", i),
+				Version: "bulk",
+			},
+		}
+	}
+
+	return items
+}
+
+func TestDynamoFailPendingPreservesEveryOriginalIndex(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("BatchWriteItem transport failed")
+	pending := []dynamoBulkWrite{
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 3, Item: storage.BulkItem{ID: "three"}}},
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 17, Item: storage.BulkItem{ID: "seventeen"}}},
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 52, Item: storage.BulkItem{ID: "fifty-two"}}},
+	}
+	result := storage.BulkResult{Succeeded: []int{1}}
+
+	dynamoFailPending(&result, pending, cause)
+
+	assert.Equal(t, []int{1}, result.Succeeded)
+	require.Len(t, result.Failures, len(pending))
+	for i, failure := range result.Failures {
+		assert.Equal(t, pending[i].indexed.Index, failure.Index)
+		assert.ErrorIs(t, failure.Err, cause)
+	}
+}
+
+func TestDynamoDBOffline_BulkCreate(t *testing.T) {
+	t.Run("happy path crosses 25 item cap and reads back", func(t *testing.T) {
+		str, fake := sharedTestDynamo(t)
+		table := "bulk-happy"
+		items := dynamoBulkTestItems(dynamoBulkChunkLimit*2 + 5)
+		callsBefore := fake.requestCount("BatchWriteItem")
+
+		result, err := str.BulkCreate(t.Context(), table, items, nil)
+		require.NoError(t, err)
+		assert.True(t, result.AllSucceeded())
+		assert.False(t, result.Stopped)
+		require.Len(t, result.Succeeded, len(items))
+		assert.Equal(t, 3, fake.requestCount("BatchWriteItem")-callsBefore)
+
+		for index, item := range items {
+			assert.Equal(t, index, result.Succeeded[index])
+
+			var got dynamoDoc
+			require.NoError(t, str.Retrieve(t.Context(), item.ID, table, &got, nil))
+			assert.Equal(t, item.ID, got.ID)
+			want, ok := item.Value.(dynamoDoc)
+			require.True(t, ok)
+			assert.Equal(t, want.Name, got.Name)
+		}
+	})
+
+	t.Run("empty input succeeds even with canceled context", func(t *testing.T) {
+		str, _ := sharedTestDynamo(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		result, err := str.BulkCreate(ctx, "bulk-empty", nil, nil)
+		require.NoError(t, err)
+		assert.Equal(t, storage.BulkResult{}, result)
+	})
+
+	t.Run("single item", func(t *testing.T) {
+		str, _ := sharedTestDynamo(t)
+		items := dynamoBulkTestItems(1)
+
+		result, err := str.BulkCreate(t.Context(), "bulk-single", items, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []int{0}, result.Succeeded)
+
+		var got dynamoDoc
+		require.NoError(t, str.Retrieve(t.Context(), items[0].ID, "bulk-single", &got, nil))
+		assert.Equal(t, items[0].ID, got.ID)
+	})
+
+	t.Run("partial preparation failure preserves original index", func(t *testing.T) {
+		str, _ := sharedTestDynamo(t)
+		table := "bulk-partial"
+		items := dynamoBulkTestItems(dynamoBulkChunkLimit + 10)
+		items[27].ID = ""
+
+		result, err := str.BulkCreate(t.Context(), table, items, nil)
+		require.Error(t, err)
+		require.Len(t, result.Failures, 1)
+		assert.Equal(t, 27, result.Failures[0].Index)
+		assert.False(t, result.Stopped)
+		assert.Len(t, result.Succeeded, len(items)-1)
+
+		for index, item := range items {
+			if index == 27 {
+				continue
+			}
+
+			var got dynamoDoc
+			require.NoError(t, str.Retrieve(t.Context(), item.ID, table, &got, nil), "successful item %d was not written", index)
+			assert.Equal(t, item.ID, got.ID)
+		}
+	})
+
+	t.Run("unprocessed item retries twice then succeeds", func(t *testing.T) {
+		str, fake := sharedTestDynamo(t)
+		items := dynamoBulkTestItems(1)
+		fake.mu.Lock()
+		fake.unprocessedRemaining[items[0].ID] = 2
+		fake.mu.Unlock()
+		callsBefore := fake.requestCount("BatchWriteItem")
+
+		result, err := str.BulkCreate(t.Context(), "bulk-unprocessed", items, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []int{0}, result.Succeeded)
+		assert.Empty(t, result.Failures)
+		assert.Equal(t, 3, fake.requestCount("BatchWriteItem")-callsBefore)
+
+		var got dynamoDoc
+		require.NoError(t, str.Retrieve(t.Context(), items[0].ID, "bulk-unprocessed", &got, nil))
+		assert.Equal(t, items[0].ID, got.ID)
+	})
+
+	t.Run("context cancellation keeps completed 25 item batch", func(t *testing.T) {
+		str, _ := sharedTestDynamo(t)
+		table := "bulk-cancel"
+		items := dynamoBulkTestItems(dynamoBulkChunkLimit + 5)
+		ctx, cancel := context.WithCancel(t.Context())
+		postHook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+			cancel()
+
+			return nil
+		}
+
+		result, err := str.BulkCreate(ctx, table, items, nil, storage.WithPostHook(postHook))
+		require.ErrorIs(t, err, context.Canceled)
+		assert.True(t, result.Stopped)
+		require.Len(t, result.Succeeded, dynamoBulkChunkLimit)
+		require.Len(t, result.Failures, 5)
+		for index := range dynamoBulkChunkLimit {
+			assert.Equal(t, index, result.Succeeded[index])
+			var got dynamoDoc
+			require.NoError(t, str.Retrieve(t.Context(), items[index].ID, table, &got, nil))
+		}
+		for offset, failure := range result.Failures {
+			assert.Equal(t, dynamoBulkChunkLimit+offset, failure.Index)
+			assert.ErrorIs(t, failure.Err, context.Canceled)
+		}
+	})
+}
+
+type capturedScanInput struct {
+	Select                    types.Select               `json:"Select"`
+	ProjectionExpression      *string                    `json:"ProjectionExpression"`
+	FilterExpression          *string                    `json:"FilterExpression"`
+	Limit                     *int32                     `json:"Limit"`
+	ExpressionAttributeNames  map[string]string          `json:"ExpressionAttributeNames"`
+	ExpressionAttributeValues map[string]json.RawMessage `json:"ExpressionAttributeValues"`
+}
+
 // errHook is returned by the failing branch of hookRecorder.
 var errHook = errors.New("hook failure")
+
+// closeTrackingTransport records CloseIdleConnections so a Close test can
+// assert the transport was genuinely released, not merely that Close returned
+// nil.
+type closeTrackingTransport struct {
+	next http.RoundTripper
+
+	mu         sync.Mutex
+	closeCalls int
+}
+
+func (t *closeTrackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.next.RoundTrip(req)
+}
+
+func (t *closeTrackingTransport) CloseIdleConnections() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.closeCalls++
+}
+
+func (t *closeTrackingTransport) CloseCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	return t.closeCalls
+}
+
+var errCredentials = errors.New("credential retrieval failed")
+
+// failingCredentialsProvider drives the aws-sdk-go-v2 credential-failure path.
+type failingCredentialsProvider struct {
+	called *atomic.Bool
+}
+
+func (p failingCredentialsProvider) Retrieve(context.Context) (aws.Credentials, error) {
+	p.called.Store(true)
+
+	return aws.Credentials{}, errCredentials
+}
 
 // hookRecorder returns a storage.HookFunc that records it was called (via
 // *called) and returns err. Parameterizing err keeps every generated
@@ -78,6 +284,48 @@ func newTestDynamo(t *testing.T, fake *dynamoFake) *DynamoDB {
 	require.NotNil(t, str.Client)
 
 	return str
+}
+
+func TestDynamoDBOffline_Close(t *testing.T) {
+	newStorage := func(t *testing.T) (*DynamoDB, *closeTrackingTransport) {
+		t.Helper()
+
+		fake := newDynamoFake()
+		transport := &closeTrackingTransport{next: fake.client().Transport}
+		client := &http.Client{Transport: transport}
+
+		str, err := New(t.Context(), "us-east-1", dynamoTestConfig(client))
+		require.NoError(t, err)
+
+		return str, transport
+	}
+
+	t.Run("closes idle connections and is idempotent", func(t *testing.T) {
+		str, transport := newStorage(t)
+
+		require.NoError(t, str.Close())
+		require.NoError(t, str.Close())
+		assert.Equal(t, 1, transport.CloseCalls(), "Close must release the AWS HTTP client's idle connections")
+	})
+
+	t.Run("concurrent calls", func(t *testing.T) {
+		str, transport := newStorage(t)
+
+		const callers = 8
+
+		errs := make(chan error, callers)
+		for range callers {
+			go func() {
+				errs <- str.Close()
+			}()
+		}
+
+		for range callers {
+			require.NoError(t, <-errs)
+		}
+
+		assert.Equal(t, 1, transport.CloseCalls(), "idle connections must be closed exactly once")
+	})
 }
 
 // sharedDynamo, sharedFake back sharedTestDynamo: every CRUD/hook/edge-case
@@ -122,6 +370,65 @@ func TestNew_HappyPath(t *testing.T) {
 	assert.Equal(t, "", str.Target())
 }
 
+func TestNew_FunctionalOptions(t *testing.T) {
+	t.Run("option satisfies required field", func(t *testing.T) {
+		fake := newDynamoFake()
+
+		str, err := New(
+			t.Context(),
+			"",
+			dynamoTestConfig(fake.client()),
+			func(d *DynamoDB) { d.Region = "us-west-2" },
+		)
+
+		require.NoError(t, err)
+		require.NotNil(t, str)
+		assert.Equal(t, "us-west-2", str.Region)
+	})
+
+	t.Run("invalid option is rejected by validation", func(t *testing.T) {
+		fake := newDynamoFake()
+
+		str, err := New(
+			t.Context(),
+			"us-east-1",
+			dynamoTestConfig(fake.client()),
+			func(d *DynamoDB) { d.PrimaryKey = "" },
+		)
+
+		require.Error(t, err)
+		assert.Nil(t, str)
+		assert.ErrorContains(t, err, "PrimaryKey")
+	})
+
+	t.Run("zero options preserves defaults", func(t *testing.T) {
+		fake := newDynamoFake()
+
+		str, err := New(t.Context(), "us-east-1", dynamoTestConfig(fake.client()))
+
+		require.NoError(t, err)
+		require.NotNil(t, str)
+		assert.Equal(t, "us-east-1", str.Region)
+		assert.Equal(t, "id", str.PrimaryKey)
+	})
+
+	t.Run("multiple options apply in order", func(t *testing.T) {
+		fake := newDynamoFake()
+
+		str, err := New(
+			t.Context(),
+			"us-east-1",
+			dynamoTestConfig(fake.client()),
+			func(d *DynamoDB) { d.PrimaryKey = "first" },
+			func(d *DynamoDB) { d.PrimaryKey = "last" },
+		)
+
+		require.NoError(t, err)
+		require.NotNil(t, str)
+		assert.Equal(t, "last", str.PrimaryKey)
+	})
+}
+
 func TestNew_PingFailure(t *testing.T) {
 	fake := newDynamoFake()
 	fake.setOverride("ListTables", http.StatusInternalServerError, "InternalServerError")
@@ -136,6 +443,31 @@ func TestNew_PingFailure(t *testing.T) {
 	str, err := New(ctx, "us-east-1", dynamoTestConfig(fake.client()))
 	require.Error(t, err)
 	assert.Nil(t, str)
+}
+
+func TestNew_CredentialFailure(t *testing.T) {
+	fake := newDynamoFake()
+	cfg := dynamoTestConfig(fake.client())
+
+	var called atomic.Bool
+	cfg.Credentials = failingCredentialsProvider{called: &called}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	str, err := New(ctx, "us-east-1", cfg)
+	require.Error(t, err)
+	assert.Nil(t, str)
+	assert.True(t, called.Load(), "the configured credential provider was not called")
+}
+
+func TestNew_RetriesThrottling(t *testing.T) {
+	fake := newDynamoFake()
+	fake.listTablesFailures = 1
+
+	str := newTestDynamo(t, fake)
+	require.NotNil(t, str)
+	assert.GreaterOrEqual(t, fake.requestCount("ListTables"), 2)
 }
 
 func TestNewWithTable_And_NewWithDynamicTable(t *testing.T) {
@@ -191,6 +523,17 @@ func TestDynamoDB_GetClient(t *testing.T) {
 	str, _ := sharedTestDynamo(t)
 
 	assert.Same(t, str.Client, str.GetClient())
+}
+
+func TestDynamoDB_ContextCancellation(t *testing.T) {
+	str, _ := sharedTestDynamo(t)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := str.Count(ctx, "table-canceled", &count.Count{})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 //////
@@ -348,7 +691,7 @@ func TestDynamoDB_Create(t *testing.T) {
 	t.Run("marshal-error", func(t *testing.T) {
 		before := str.GetCounterCreatedFailed().Value()
 
-		// A map with an empty-string key is what dynamodbattribute rejects
+		// A map with an empty-string key is what attributevalue rejects
 		// ("map key cannot be empty") - most Go values marshal into
 		// *something*, so this is the reliable way to hit MarshalMap's
 		// error branch.
@@ -422,9 +765,9 @@ func TestDynamoDB_Update(t *testing.T) {
 
 	const table = "table-update"
 
-	fake.putItem(table, map[string]*dynamodb.AttributeValue{
-		"id":   {S: aws.String("u1")},
-		"name": {S: aws.String("old")},
+	fake.putItem(table, map[string]types.AttributeValue{
+		"id":   stringAttribute("u1"),
+		"name": stringAttribute("old"),
 	})
 
 	t.Run("empty-id", func(t *testing.T) {
@@ -576,7 +919,7 @@ func TestDynamoDB_Delete(t *testing.T) {
 	})
 
 	t.Run("happy-path-with-hooks", func(t *testing.T) {
-		fake.putItem(table, map[string]*dynamodb.AttributeValue{"id": {S: aws.String("d1")}})
+		fake.putItem(table, map[string]types.AttributeValue{"id": stringAttribute("d1")})
 
 		var preCalled, postCalled bool
 
@@ -603,9 +946,9 @@ func TestDynamoDB_Retrieve(t *testing.T) {
 
 	const table = "table-retrieve"
 
-	fake.putItem(table, map[string]*dynamodb.AttributeValue{
-		"id":   {S: aws.String("r1")},
-		"name": {S: aws.String("alpha")},
+	fake.putItem(table, map[string]types.AttributeValue{
+		"id":   stringAttribute("r1"),
+		"name": stringAttribute("alpha"),
 	})
 
 	t.Run("empty-id", func(t *testing.T) {
@@ -715,8 +1058,8 @@ func TestDynamoDB_Count(t *testing.T) {
 
 	const table = "table-count"
 
-	fake.putItem(table, map[string]*dynamodb.AttributeValue{"id": {S: aws.String("c1")}, "status": {S: aws.String("active")}})
-	fake.putItem(table, map[string]*dynamodb.AttributeValue{"id": {S: aws.String("c2")}, "status": {S: aws.String("active")}})
+	fake.putItem(table, map[string]types.AttributeValue{"id": stringAttribute("c1"), "status": stringAttribute("active")})
+	fake.putItem(table, map[string]types.AttributeValue{"id": stringAttribute("c2"), "status": stringAttribute("active")})
 
 	t.Run("happy-path-no-filter", func(t *testing.T) {
 		cnt, err := str.Count(t.Context(), table, &count.Count{})
@@ -726,10 +1069,10 @@ func TestDynamoDB_Count(t *testing.T) {
 		reqs := fake.scanRequests()
 		require.NotEmpty(t, reqs)
 
-		var sent dynamodb.ScanInput
+		var sent capturedScanInput
 
 		require.NoError(t, json.Unmarshal(reqs[len(reqs)-1].body, &sent))
-		assert.Equal(t, dynamodb.SelectCount, aws.StringValue(sent.Select))
+		assert.Equal(t, types.SelectCount, sent.Select)
 	})
 
 	t.Run("happy-path-with-filter", func(t *testing.T) {
@@ -745,14 +1088,14 @@ func TestDynamoDB_Count(t *testing.T) {
 		reqs := fake.scanRequests()
 		require.NotEmpty(t, reqs)
 
-		var sent dynamodb.ScanInput
+		var sent capturedScanInput
 
 		require.NoError(t, json.Unmarshal(reqs[len(reqs)-1].body, &sent))
 		require.Len(t, sent.ExpressionAttributeNames, 1)
 
 		for placeholder, real := range sent.ExpressionAttributeNames {
 			assert.Regexp(t, `^#[A-Za-z0-9_]+$`, placeholder)
-			assert.Equal(t, "created-at", aws.StringValue(real))
+			assert.Equal(t, "created-at", real)
 		}
 	})
 
@@ -814,16 +1157,13 @@ func TestDynamoDB_Count(t *testing.T) {
 	})
 
 	t.Run("pagination", func(t *testing.T) {
-		one := int64(1)
-		two := int64(2)
-
 		restore := fake.setScanQueue([]dynamodb.ScanOutput{
 			{
-				Count:            &two,
-				LastEvaluatedKey: map[string]*dynamodb.AttributeValue{"id": {S: aws.String("c2")}},
+				Count:            2,
+				LastEvaluatedKey: map[string]types.AttributeValue{"id": stringAttribute("c2")},
 			},
 			{
-				Count: &one,
+				Count: 1,
 			},
 		})
 		t.Cleanup(restore)
@@ -849,8 +1189,8 @@ func TestDynamoDB_List(t *testing.T) {
 
 	const table = "table-list"
 
-	fake.putItem(table, map[string]*dynamodb.AttributeValue{
-		"id": {S: aws.String("l1")}, "name": {S: aws.String("alpha")}, "created-at": {S: aws.String("2020-01-01")},
+	fake.putItem(table, map[string]types.AttributeValue{
+		"id": stringAttribute("l1"), "name": stringAttribute("alpha"), "created-at": stringAttribute("2020-01-01"),
 	})
 
 	t.Run("happy-path-returns-items-not-just-count", func(t *testing.T) {
@@ -866,10 +1206,10 @@ func TestDynamoDB_List(t *testing.T) {
 		reqs := fake.scanRequests()
 		require.NotEmpty(t, reqs)
 
-		var sent dynamodb.ScanInput
+		var sent capturedScanInput
 
 		require.NoError(t, json.Unmarshal(reqs[len(reqs)-1].body, &sent))
-		assert.Empty(t, aws.StringValue(sent.Select))
+		assert.Empty(t, sent.Select)
 	})
 
 	t.Run("fields-projection-sanitizes-unsafe-names", func(t *testing.T) {
@@ -880,7 +1220,7 @@ func TestDynamoDB_List(t *testing.T) {
 		reqs := fake.scanRequests()
 		require.NotEmpty(t, reqs)
 
-		var sent dynamodb.ScanInput
+		var sent capturedScanInput
 
 		require.NoError(t, json.Unmarshal(reqs[len(reqs)-1].body, &sent))
 		require.NotNil(t, sent.ProjectionExpression)
@@ -888,7 +1228,7 @@ func TestDynamoDB_List(t *testing.T) {
 
 		for placeholder, real := range sent.ExpressionAttributeNames {
 			assert.Regexp(t, `^#[A-Za-z0-9_]+$`, placeholder)
-			assert.Equal(t, "created-at", aws.StringValue(real))
+			assert.Equal(t, "created-at", real)
 		}
 	})
 
@@ -900,11 +1240,18 @@ func TestDynamoDB_List(t *testing.T) {
 		reqs := fake.scanRequests()
 		require.NotEmpty(t, reqs)
 
-		var sent dynamodb.ScanInput
+		var sent capturedScanInput
 
 		require.NoError(t, json.Unmarshal(reqs[len(reqs)-1].body, &sent))
 		require.NotNil(t, sent.Limit)
 		assert.EqualValues(t, 5, *sent.Limit)
+	})
+
+	t.Run("limit-over-int32-is-rejected", func(t *testing.T) {
+		var got []dynamoDoc
+
+		err := str.List(t.Context(), table, &got, &list.List{Limit: math.MaxInt32 + 1})
+		require.Error(t, err)
 	})
 
 	t.Run("filter-sanitizes-unsafe-names", func(t *testing.T) {
@@ -915,7 +1262,7 @@ func TestDynamoDB_List(t *testing.T) {
 		reqs := fake.scanRequests()
 		require.NotEmpty(t, reqs)
 
-		var sent dynamodb.ScanInput
+		var sent capturedScanInput
 
 		require.NoError(t, json.Unmarshal(reqs[len(reqs)-1].body, &sent))
 		require.NotNil(t, sent.FilterExpression)
@@ -924,7 +1271,7 @@ func TestDynamoDB_List(t *testing.T) {
 		var foundSanitized bool
 
 		for placeholder, real := range sent.ExpressionAttributeNames {
-			if aws.StringValue(real) == "created-at" {
+			if real == "created-at" {
 				assert.Regexp(t, `^#f[A-Za-z0-9_]+$`, placeholder)
 
 				foundSanitized = true
@@ -935,18 +1282,18 @@ func TestDynamoDB_List(t *testing.T) {
 	})
 
 	t.Run("offset-and-limit-across-pages", func(t *testing.T) {
-		items := []map[string]*dynamodb.AttributeValue{
-			{"id": {S: aws.String("a")}, "name": {S: aws.String("a")}},
-			{"id": {S: aws.String("b")}, "name": {S: aws.String("b")}},
-			{"id": {S: aws.String("c")}, "name": {S: aws.String("c")}},
+		items := []map[string]types.AttributeValue{
+			{"id": stringAttribute("a"), "name": stringAttribute("a")},
+			{"id": stringAttribute("b"), "name": stringAttribute("b")},
+			{"id": stringAttribute("c"), "name": stringAttribute("c")},
 		}
-		items2 := []map[string]*dynamodb.AttributeValue{
-			{"id": {S: aws.String("d")}, "name": {S: aws.String("d")}},
-			{"id": {S: aws.String("e")}, "name": {S: aws.String("e")}},
+		items2 := []map[string]types.AttributeValue{
+			{"id": stringAttribute("d"), "name": stringAttribute("d")},
+			{"id": stringAttribute("e"), "name": stringAttribute("e")},
 		}
 
 		restore := fake.setScanQueue([]dynamodb.ScanOutput{
-			{Items: items, LastEvaluatedKey: map[string]*dynamodb.AttributeValue{"id": {S: aws.String("c")}}},
+			{Items: items, LastEvaluatedKey: map[string]types.AttributeValue{"id": stringAttribute("c")}},
 			{Items: items2},
 		})
 		t.Cleanup(restore)
