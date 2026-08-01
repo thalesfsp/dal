@@ -139,9 +139,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - A documented `BulkCreate` partial-failure contract, original-input-index
-  result types, and a chunking helper. `memory` is the reference
-  implementation; the other eleven adapters currently return
-  `storage.ErrBulkCreateNotImplemented`.
+  result types, and a chunking helper. All twelve adapters implement it: native
+  multi-row `INSERT` for `mysql`/`postgres`/`sqlite`, unordered `InsertMany` for
+  `mongodb`, `_bulk` for `elasticsearch`, `BatchWriteItem` with
+  `UnprocessedItems` retry for `dynamodb`, and pipelining for `redis`.
+  `bolt`, `file`, `memory`, `s3` and `sftp` loop internally behind the same
+  contract. Failures are reported by original input index, and that index
+  survives internal chunking, retries and bounded concurrency.
 - Real, idempotent `Close` implementations for all twelve adapters, including
   both the SFTP channel and SSH transport for `sftp` and the database handle
   for `bolt`.

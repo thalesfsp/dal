@@ -159,7 +159,7 @@ func (s *MyStorage) BulkCreate(
 }
 ```
 
-Only `memory` currently implements the operation. The other shipped adapters return the same sentinel shown above.
+The sentinel above is for *your* implementation if you do not need bulk writes. All twelve shipped adapters implement the operation for real — natively where the backend has a batch primitive, and by looping internally where it does not.
 
 ## 5. AWS SDK v1 types became AWS SDK v2 types
 
