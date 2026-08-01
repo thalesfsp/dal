@@ -84,6 +84,28 @@ func mongoBulkReadResponses(items []storage.BulkItem, failed map[int]bool) []bso
 	return responses
 }
 
+func TestMongoFailEveryPreparedCoversEveryOriginalIndex(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("InsertMany command failed")
+	prepared := []mongoBulkDocument{
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 4, Item: storage.BulkItem{ID: "four"}}},
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 18, Item: storage.BulkItem{ID: "eighteen"}}},
+		{indexed: storage.Indexed[storage.BulkItem]{Index: 127, Item: storage.BulkItem{ID: "one-two-seven"}}},
+	}
+
+	failed := mongoInsertFailures(prepared, cause)
+	require.Len(t, failed, len(prepared))
+	failedOriginalIndices := make([]int, 0, len(prepared))
+	for localIndex, document := range prepared {
+		itemErr, ok := failed[localIndex]
+		require.True(t, ok, "prepared item at local index %d was not failed", localIndex)
+		assert.ErrorIs(t, itemErr, cause)
+		failedOriginalIndices = append(failedOriginalIndices, document.indexed.Index)
+	}
+	assert.Equal(t, []int{4, 18, 127}, failedOriginalIndices)
+}
+
 func TestMongoDBOffline_BulkCreate(t *testing.T) {
 	t.Run("happy path crosses adapter chunk limit and reads back", func(t *testing.T) {
 		st, dep := newMockedStorage(t)

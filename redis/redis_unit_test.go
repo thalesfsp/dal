@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -71,6 +72,84 @@ func redisBulkTestItems(count int) []storage.BulkItem {
 	}
 
 	return items
+}
+
+func TestRedisPrepareChunkErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	str := &Redis{}
+	prm := &create.Create{}
+	options, err := storage.NewOptions[*create.Create]()
+	require.NoError(t, err)
+	rejected := errors.New("Redis pre-hook rejected item")
+	options.PreHookFunc = func(
+		_ context.Context,
+		adapter storage.IStorage,
+		id string,
+		target string,
+		_ any,
+		gotPrm *create.Create,
+	) error {
+		assert.Same(t, str, adapter)
+		assert.Equal(t, "namespace", target)
+		assert.Same(t, prm, gotPrm)
+		if id == "reject" {
+			return rejected
+		}
+
+		return nil
+	}
+	chunk := []storage.Indexed[storage.BulkItem]{
+		{Index: 2, Item: storage.BulkItem{ID: "", Value: "missing"}},
+		{Index: 7, Item: storage.BulkItem{ID: "reject", Value: "rejected"}},
+		{Index: 12, Item: storage.BulkItem{ID: "unmarshalable", Value: make(chan int)}},
+		{Index: 19, Item: storage.BulkItem{ID: "accepted", Value: map[string]string{"value": "ok"}}},
+	}
+	result := storage.BulkResult{}
+
+	prepared, stoppedAt := str.redisPrepareChunk(
+		t.Context(),
+		"namespace",
+		chunk,
+		prm,
+		options,
+		&result,
+	)
+	assert.Equal(t, -1, stoppedAt)
+	require.Len(t, prepared, 1)
+	assert.Equal(t, 19, prepared[0].indexed.Index)
+	assert.Equal(t, []byte(`{"value":"ok"}`), prepared[0].value)
+	require.Len(t, result.Failures, 3)
+	assert.Equal(t, []int{2, 7, 12}, []int{
+		result.Failures[0].Index,
+		result.Failures[1].Index,
+		result.Failures[2].Index,
+	})
+	assert.Equal(t, "id required", result.Failures[0].Err.Error())
+	assert.ErrorIs(t, result.Failures[1].Err, rejected)
+	assert.Equal(
+		t,
+		"failed to "+"to marshal. Original Error: json: unsupported type: chan int",
+		result.Failures[2].Err.Error(),
+	)
+	var unsupportedType *json.UnsupportedTypeError
+	assert.ErrorAs(t, result.Failures[2].Err, &unsupportedType)
+	assert.Equal(t, reflect.TypeFor[chan int](), unsupportedType.Type)
+
+	canceledCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	canceledResult := storage.BulkResult{}
+	prepared, stoppedAt = str.redisPrepareChunk(
+		canceledCtx,
+		"namespace",
+		chunk[3:],
+		prm,
+		options,
+		&canceledResult,
+	)
+	assert.Empty(t, prepared)
+	assert.Equal(t, 0, stoppedAt)
+	assert.Empty(t, canceledResult.Failures)
 }
 
 func TestRedisOffline_BulkCreate(t *testing.T) {
