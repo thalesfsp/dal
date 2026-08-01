@@ -500,7 +500,8 @@ func (p *SQLite) Retrieve(ctx context.Context, id, target string, v any, prm *re
 
 // List data.
 //
-// NOTE: It uses param.List.Search to query the data.
+// Search is executed as the SQL query. Sort, Limit, Offset, and Fields are not
+// translated into SQL; include them in Search when needed.
 func (p *SQLite) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.
@@ -883,7 +884,7 @@ func (p *SQLite) Close() error {
 // Factory.
 //////
 
-// New creates a new postgres storage.
+// New creates a new SQLite storage.
 func New(ctx context.Context, dataSource string) (*SQLite, error) {
 	// Enforces IStorage interface implementation.
 	var _ storage.IStorage = (*SQLite)(nil)

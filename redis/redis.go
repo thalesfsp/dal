@@ -399,10 +399,8 @@ func (r *Redis) Retrieve(ctx context.Context, id, target string, v any, prm *ret
 
 // List data.
 //
-// NOTE: It uses params.List.Search to query the data.
-//
-// NOTE: Redis does not support the concept of "offset" and "limit" in the same
-// way that a traditional SQL database does.
+// Search is a glob passed to SCAN. Sort, Limit, Offset, and Fields are applied
+// to the decoded values after matching.
 func (r *Redis) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.

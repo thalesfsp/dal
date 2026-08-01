@@ -407,10 +407,8 @@ func (s *File) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 
 // List data.
 //
-// NOTE: It uses params.List.Search to query the data.
-//
-// NOTE: File does not support the concept of "offset" and "limit" in the same
-// way that a traditional SQL database does.
+// Search is a glob matched against filenames. Sort, Limit, Offset, and Fields
+// are applied to the decoded documents after matching.
 func (s *File) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.

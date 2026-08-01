@@ -110,6 +110,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `memory.List` builds its JSON payload with a `strings.Builder` instead of
   repeated string concatenation (was O(n²) in the number of matched keys).
 
+## [3.0.0] - 2026-07-31
+### Breaking
+- The module and all package imports moved to the `/v3` major-version path.
+- `memory`, `file`, `sftp`, `bolt` and `redis` now honor `List`'s `Sort`,
+  `Limit`, `Offset` and `Fields` parameters. A `list.New()` value defaults
+  `Limit` to 10, so calls that previously returned every record can now return
+  ten. `file`, `redis` and `sftp` list responses changed from key lists to
+  decoded `ResponseList[T]` documents.
+- Caller parameters are merged over validated operation defaults instead of
+  replacing them wholesale. Non-zero caller fields now retain defaults for
+  fields the caller did not set.
+- `Close() error` is now part of `storage.IStorage`; `storage.ICloser` and the
+  `storage.Close` helper were removed. Third-party implementations must add an
+  idempotent `Close` method.
+- `BulkCreate` was added to `storage.IStorage`. Third-party implementations
+  must implement the method even if they return
+  `storage.ErrBulkCreateNotImplemented`.
+- `s3` and `dynamodb` migrated from `aws-sdk-go` v1 to
+  `aws-sdk-go-v2`. Their exported `Config` aliases and DynamoDB helper types
+  now have SDK v2 shapes.
+- `mongodb` migrated from `mongo-driver` v1 to v2. Its exported `Config` alias
+  now refers to the v2 driver's `options.ClientOptions`.
+- `dynamodb.New`, `NewWithTable` and `NewWithDynamicTable` accept functional
+  options and apply them before validation.
+- `redis.Retrieve` returns Not Found for a stored zero-byte value instead of
+  succeeding without decoding anything.
+
+### Added
+- A documented `BulkCreate` partial-failure contract, original-input-index
+  result types, and a chunking helper. `memory` is the reference
+  implementation; the other eleven adapters currently return
+  `storage.ErrBulkCreateNotImplemented`.
+- Real, idempotent `Close` implementations for all twelve adapters, including
+  both the SFTP channel and SSH transport for `sftp` and the database handle
+  for `bolt`.
+- Adapter-scope decision: suggestion #7 (new adapters) was considered and
+  deliberately declined. Twelve adapters already ship, no specific backend
+  was requested, and every addition creates permanent maintenance cost.
+
+### Fixed
+- `bolt.List` no longer truncates its cursor at `Limit` before sorting. It now
+  sorts the full matched set before pagination, rather than returning the N
+  records it happened to encounter instead of the N smallest or largest.
+- Functional options passed to DynamoDB constructors can satisfy required
+  fields because they run before validation; invalid option results are still
+  rejected.
+- Redis distinguishes a zero-byte stored value from valid non-empty JSON such
+  as `{}`, `[]`, `""` and `null`.
+
+### Security
+- `go.opentelemetry.io/otel/sdk` was bumped to v1.43.0 to fix the BSD `kenv`
+  PATH-hijack issue. That security commit shipped in v2.2.3, before the v3
+  branch diverged, so v3 retains the patched dependency baseline.
+- Migrating away from `aws-sdk-go` v1 removes the affected S3 Crypto code for
+  `GO-2022-0646` (CBC padding oracle) and `GO-2022-0635` (in-band key
+  negotiation) from the dependency graph.
+
 ## [2.2.0] - 2026-07-05
 ### Changed
 - All dependencies upgraded to their latest Go 1.24-compatible releases

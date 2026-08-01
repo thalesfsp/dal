@@ -442,10 +442,8 @@ func (s *S3) Retrieve(ctx context.Context, id, target string, v any, prm *retrie
 
 // List data.
 //
-// NOTE: It uses params.List.Search to query the data.
-//
-// NOTE: S3 does not support the concept of "offset" and "limit" in the same
-// way that a traditional SQL database does.
+// List returns the keys in the configured bucket. Search, Sort, Limit, Offset,
+// and Fields are not currently applied.
 func (s *S3) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.

@@ -539,7 +539,8 @@ func (d *DynamoDB) Retrieve(ctx context.Context, id, target string, v any, prm *
 
 // List data.
 //
-// NOTE: It uses param.List.Any for DynamoDB filter expressions.
+// Any accepts a map[string]any for DynamoDB filter expressions. Limit, Offset,
+// and Fields are applied; Sort is not currently used.
 //
 //nolint:gocognit,cyclop,funlen,maintidx
 func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.List, opts ...storage.Func[*list.List]) error {

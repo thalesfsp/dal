@@ -550,7 +550,8 @@ func (m *MongoDB) Retrieve(ctx context.Context, id, target string, v any, prm *r
 // that are part of a covered index (i.e., an index that includes all the
 // projected fields) are less likely to impact performance.
 //
-// NOTE: It uses param.List.Search to query the data.
+// Any accepts a bson.M filter. Sort, Limit, Offset, and Fields are translated
+// into MongoDB find options; Search is not used.
 func (m *MongoDB) List(ctx context.Context, target string, v any, prm *list.List, opts ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.

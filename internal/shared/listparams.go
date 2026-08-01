@@ -220,10 +220,9 @@ func SortDocuments(docs [][]byte, s customsort.SortSlice) ([][]byte, error) {
 
 // PaginateDocuments applies offset then limit to docs.
 //
-// A non-positive limit means "no limit". That matches the params package, where
-// Limit carries `validate:"omitempty,gt=0"` so zero is the unset value — note
-// that list.New() defaults Limit to 10, so an adapter that honors this helper
-// returns 10 records by default where it previously returned every record.
+// A non-positive limit means "no limit". Limit carries
+// `validate:"omitempty,gt=0"`, while list.New() sets it to 10; callers that pass
+// a value returned by list.New therefore receive at most 10 records.
 //
 // An offset past the end yields an empty slice rather than an error.
 func PaginateDocuments(docs [][]byte, offset, limit int) [][]byte {
