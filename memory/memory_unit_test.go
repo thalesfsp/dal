@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v3/internal/shared"
+	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/customsort"
@@ -180,17 +182,41 @@ func TestMemory_ListParams(t *testing.T) {
 			Search: "params-*",
 			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
 		})
-		require.Len(t, asc, 13)
+		require.Len(t, asc, 10)
 		assert.Equal(t, 0, asc[0].Rank)
-		assert.Equal(t, 12, asc[12].Rank)
+		assert.Equal(t, 9, asc[9].Rank)
 
 		desc := listDocs(t, &list.List{
 			Search: "params-*",
 			Sort:   customsort.SortSlice{{"rank", customsort.Desc}},
 		})
-		require.Len(t, desc, 13)
+		require.Len(t, desc, 10)
 		assert.Equal(t, 12, desc[0].Rank)
-		assert.Equal(t, 0, desc[12].Rank)
+		assert.Equal(t, 3, desc[9].Rank)
+	})
+
+	t.Run("literal sort params inherit default limit and agree with pre-hook", func(t *testing.T) {
+		var (
+			got       ResponseList[memoryListParamsDoc]
+			hookLimit int
+		)
+
+		err := str.List(ctx, "", &got, &list.List{
+			Sort: customsort.SortSlice{{"rank", customsort.Asc}},
+		}, storage.WithPreHook(func(
+			_ context.Context,
+			_ storage.IStorage,
+			_, _ string,
+			_ any,
+			params *list.List,
+		) error {
+			hookLimit = params.Limit
+
+			return nil
+		}))
+		require.NoError(t, err)
+		require.Equal(t, 10, hookLimit)
+		require.Len(t, got.Items, hookLimit)
 	})
 
 	t.Run("multi-key sort breaks ties with second key", func(t *testing.T) {
@@ -201,7 +227,7 @@ func TestMemory_ListParams(t *testing.T) {
 				{"rank", customsort.Desc},
 			},
 		})
-		require.Len(t, got, 13)
+		require.Len(t, got, 10)
 		assert.Equal(t, "a", got[0].Group)
 		assert.Equal(t, 11, got[0].Rank)
 		assert.Equal(t, 9, got[1].Rank)
@@ -235,7 +261,7 @@ func TestMemory_ListParams(t *testing.T) {
 			Sort:   customsort.SortSlice{{"rank", customsort.Asc}},
 			Fields: []string{"id"},
 		}))
-		require.Len(t, got.Items, 13)
+		require.Len(t, got.Items, 10)
 		assert.Equal(t, map[string]any{"id": "doc-00"}, got.Items[0])
 	})
 

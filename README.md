@@ -105,7 +105,7 @@ Closing `bolt` is a correctness requirement. bbolt holds an exclusive lock on it
 
 ## List parameters
 
-`list.List` exposes `Sort`, `Limit`, `Offset`, and `Fields`. `list.New()` sets **`Limit` to 10 by default**. `bolt`, `file`, `memory`, `redis`, and `sftp` apply the values in the caller's original params in the order sort, paginate, then project. Pass the value returned by `list.New()` when its default limit is wanted; a nil params pointer applies none of these four fields. `memory.List` has no defined order unless `Sort` is set because it ranges a `sync.Map`.
+`list.List` exposes `Sort`, `Limit`, `Offset`, and `Fields`. `list.New()` sets **`Limit` to 10 by default**. `bolt`, `file`, `memory`, `redis`, and `sftp` merge caller params over those defaults, then apply the merged values in the order sort, paginate, then project. A literal such as `&list.List{Sort: ...}` therefore inherits the default limit; a nil params pointer applies none of these four fields. `memory.List` has no defined order unless `Sort` is set because it ranges a `sync.Map`.
 
 `elasticsearch` and `mongodb` translate all four fields. `dynamodb` sends `Limit` and a `Fields` projection to `Scan`, skips `Offset` items client-side while consuming paginated results, and does not use `Sort`. The SQL adapters execute `Search` as the query and do not translate the four structured fields. `s3.List` does not apply them.
 

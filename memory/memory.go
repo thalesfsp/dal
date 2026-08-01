@@ -255,7 +255,11 @@ func (s *Memory) List(ctx context.Context, target string, v any, prm *list.List,
 
 		var err error
 
-		docs, err = shared.ApplyListParams(docs, prm)
+		if prm == nil {
+			params = nil
+		}
+
+		docs, err = shared.ApplyListParams(docs, params)
 		if err != nil {
 			return envelope.Result[envelope.Void]{}, err
 		}

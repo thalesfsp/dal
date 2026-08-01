@@ -71,19 +71,17 @@ prm := &list.List{
 }
 ```
 
-After, start with `list.New()` when its defaults must affect the five in-process list implementations, then change the fields you intend to override:
+After, set only the fields you intend to override; the five in-process list implementations use the merged defaults:
 
 ```go
-prm, err := list.New()
-if err != nil {
-	return err
+prm := &list.List{
+	Sort: customsort.SortSlice{{"title", customsort.Asc}},
 }
-prm.Sort = customsort.SortSlice{{"title", customsort.Asc}}
 ```
 
 Audit code that depended on zero values clearing defaults. Most zero values mean “unset.” The intentional exceptions are `delete.Soft == false`, `list.Count == 0`, and `list.Offset == 0`, which remain meaningful values.
 
-There is one current implementation exception: `bolt`, `file`, `memory`, `redis`, and `sftp` pass the original params pointer, rather than the merged value, to their structured `List` post-processing. A literal such as `&list.List{Sort: ...}` therefore does not acquire the default `Limit` for that post-processing. Pass a `list.New()` value or set `Limit` explicitly. This does not affect the merged params observed by hooks.
+`bolt`, `file`, `memory`, `redis`, and `sftp` pass the same merged params to hooks and structured `List` post-processing. A literal such as `&list.List{Sort: ...}` therefore acquires the default `Limit` of 10 for sorting, pagination, and projection. A nil params pointer still applies none of those fields.
 
 ## 3. The module uses the v3 import path
 
