@@ -626,6 +626,63 @@ func (s *Memory) Create(ctx context.Context, id, target string, v any, prm *crea
 	return id, nil
 }
 
+// BulkCreate creates data in backend-sized chunks. Memory has no native batch
+// limit; using the strictest adapter limit here makes this reference
+// implementation exercise the same original-index bookkeeping as capped
+// backends.
+func (s *Memory) BulkCreate(
+	ctx context.Context,
+	target string,
+	items []storage.BulkItem,
+	prm *create.Create,
+	options ...storage.Func[*create.Create],
+) (storage.BulkResult, error) {
+	const chunkLimit = 25
+
+	if len(items) == 0 {
+		return storage.BulkResult{}, nil
+	}
+
+	chunks, err := storage.ChunkIndexed(items, chunkLimit)
+	if err != nil {
+		return storage.BulkResult{}, err
+	}
+
+	result := storage.BulkResult{
+		Succeeded: make([]int, 0, len(items)),
+	}
+
+	for chunkIndex, chunk := range chunks {
+		for itemIndex, indexed := range chunk {
+			if err := ctx.Err(); err != nil {
+				result.Stopped = true
+
+				for _, remaining := range chunk[itemIndex:] {
+					result.Failures = append(result.Failures, storage.BulkItemError{Index: remaining.Index, Err: err})
+				}
+
+				for _, remainingChunk := range chunks[chunkIndex+1:] {
+					for _, remaining := range remainingChunk {
+						result.Failures = append(result.Failures, storage.BulkItemError{Index: remaining.Index, Err: err})
+					}
+				}
+
+				return result, result.Err()
+			}
+
+			if _, err := s.Create(ctx, indexed.Item.ID, target, indexed.Item.Value, prm, options...); err != nil {
+				result.Failures = append(result.Failures, storage.BulkItemError{Index: indexed.Index, Err: err})
+
+				continue
+			}
+
+			result.Succeeded = append(result.Succeeded, indexed.Index)
+		}
+	}
+
+	return result, result.Err()
+}
+
 // Update data.
 //
 // NOTE: Not truly an update, it's an insert.

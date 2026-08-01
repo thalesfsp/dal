@@ -553,6 +553,18 @@ func (s *S3) List(ctx context.Context, target string, v any, prm *list.List, opt
 	return nil
 }
 
+// BulkCreate creates data in bulk.
+func (s *S3) BulkCreate(
+	context.Context,
+	string,
+	[]storage.BulkItem,
+	*create.Create,
+	...storage.Func[*create.Create],
+) (storage.BulkResult, error) {
+	// TODO(v3): real implementation lands in E2.
+	return storage.BulkResult{}, storage.ErrBulkCreateNotImplemented
+}
+
 // Create data.
 //
 // NOTE: `v` can be a file, a string, or an struct.

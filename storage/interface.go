@@ -63,6 +63,48 @@ type IStorage interface {
 	// Create data.
 	Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...Func[*create.Create]) (string, error)
 
+	// BulkCreate creates all items using the same target, parameters, and
+	// options. Each BulkItem.Value has the same semantics as a call to Create.
+	// BulkItem.ID must be non-empty; an empty ID is a per-item failure. Requiring
+	// caller-supplied IDs keeps successful identifiers known from the input even
+	// on backends whose single-item Create can generate an ID.
+	//
+	// BulkCreate is not transactional: successful writes remain committed when
+	// other items fail. Callers must inspect BulkResult before retrying to avoid
+	// blindly repeating successful writes. Backends may chunk, parallelize, or
+	// reorder work, so neither processing order nor result-slice order is
+	// guaranteed. Original zero-based input indices are the only portable way
+	// to correlate outcomes with inputs.
+	//
+	// Every input index appears exactly once in BulkResult.Succeeded or
+	// BulkResult.Failures. A failure retains its underlying error. If any item
+	// is unsuccessful, err is non-nil and is an inspectable *BulkError; if every
+	// item succeeds, err is nil and BulkResult.AllSucceeded reports true without
+	// scanning a slice. BulkResult.Stopped is true when processing stopped early
+	// after a failure or context cancellation. In that case, unattempted items
+	// appear in Failures with the error that stopped processing. Stopped is
+	// false when processing continued through all inputs despite item failures.
+	//
+	// Options retain Create's per-item hook semantics: the pre-hook runs before
+	// each attempted write and the post-hook runs after each successful backend
+	// write. A pre-hook failure prevents that item's write. A post-hook failure
+	// is reported for that item but does not roll its already-completed write
+	// back, consistent with the non-atomic contract.
+	//
+	// Empty input succeeds with a zero BulkResult and nil error, even if ctx is
+	// already canceled. BulkCreate is not atomic and makes no rollback promise.
+	// If the same non-empty ID appears more than once, which value remains is
+	// unspecified; each occurrence is still classified independently by its
+	// input index. Callers requiring a deterministic winner must remove duplicate
+	// IDs before calling BulkCreate.
+	BulkCreate(
+		ctx context.Context,
+		target string,
+		items []BulkItem,
+		prm *create.Create,
+		options ...Func[*create.Create],
+	) (BulkResult, error)
+
 	// Update data.
 	Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...Func[*update.Update]) error
 
@@ -158,6 +200,18 @@ func List[T any](ctx context.Context, s IStorage, target string, prm *list.List,
 // Create data.
 func Create[T any](ctx context.Context, s IStorage, id, target string, t T, prm *create.Create, options ...Func[*create.Create]) (string, error) {
 	return s.Create(ctx, id, target, t, prm, options...)
+}
+
+// BulkCreate creates many items using the storage's native bulk surface.
+func BulkCreate(
+	ctx context.Context,
+	s IStorage,
+	target string,
+	items []BulkItem,
+	prm *create.Create,
+	options ...Func[*create.Create],
+) (BulkResult, error) {
+	return s.BulkCreate(ctx, target, items, prm, options...)
 }
 
 // Update data.

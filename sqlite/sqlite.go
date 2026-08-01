@@ -605,6 +605,18 @@ func (p *SQLite) List(ctx context.Context, target string, v any, prm *list.List,
 	return nil
 }
 
+// BulkCreate creates data in bulk.
+func (p *SQLite) BulkCreate(
+	context.Context,
+	string,
+	[]storage.BulkItem,
+	*create.Create,
+	...storage.Func[*create.Create],
+) (storage.BulkResult, error) {
+	// TODO(v3): real implementation lands in E2.
+	return storage.BulkResult{}, storage.ErrBulkCreateNotImplemented
+}
+
 // Create data.
 //
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to

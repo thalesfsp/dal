@@ -39,6 +39,9 @@ type Mock struct {
 	// Create data.
 	MockCreate func(ctx context.Context, id, target string, v any, prm *create.Create, options ...Func[*create.Create]) (string, error)
 
+	// BulkCreate creates data in bulk.
+	MockBulkCreate func(ctx context.Context, target string, items []BulkItem, prm *create.Create, options ...Func[*create.Create]) (BulkResult, error)
+
 	// Update data.
 	MockUpdate func(ctx context.Context, id, target string, v any, prm *update.Update, options ...Func[*update.Update]) error
 
@@ -150,6 +153,21 @@ func (m *Mock) Create(ctx context.Context, id, target string, v any, prm *create
 	}
 
 	return m.MockCreate(ctx, id, target, v, prm, options...)
+}
+
+// BulkCreate creates data in bulk.
+func (m *Mock) BulkCreate(
+	ctx context.Context,
+	target string,
+	items []BulkItem,
+	prm *create.Create,
+	options ...Func[*create.Create],
+) (BulkResult, error) {
+	if m.MockBulkCreate == nil {
+		return BulkResult{}, customerror.NewMissingError("MockBulkCreate")
+	}
+
+	return m.MockBulkCreate(ctx, target, items, prm, options...)
 }
 
 // Update data.

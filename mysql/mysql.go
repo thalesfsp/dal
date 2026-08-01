@@ -614,6 +614,18 @@ func (m *MySQL) List(ctx context.Context, target string, v any, prm *list.List, 
 	return nil
 }
 
+// BulkCreate creates data in bulk.
+func (m *MySQL) BulkCreate(
+	context.Context,
+	string,
+	[]storage.BulkItem,
+	*create.Create,
+	...storage.Func[*create.Create],
+) (storage.BulkResult, error) {
+	// TODO(v3): real implementation lands in E2.
+	return storage.BulkResult{}, storage.ErrBulkCreateNotImplemented
+}
+
 // Create data.
 //
 // NOTE: MySQL does not support RETURNING clause. This method uses
