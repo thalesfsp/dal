@@ -111,7 +111,7 @@ The SQL adapters execute `Search` as the query and do not translate these four s
 
 ## Bulk create
 
-`BulkCreate` is part of `storage.IStorage`. At present, `memory` is the reference implementation; the other eleven adapters return `storage.ErrBulkCreateNotImplemented`.
+`BulkCreate` is part of `storage.IStorage`, and all twelve adapters implement it. Where the backend has a native batch primitive it is used — multi-row `INSERT` for the SQL adapters, `InsertMany` for `mongodb`, `_bulk` for `elasticsearch`, `BatchWriteItem` for `dynamodb`, and pipelining for `redis`. The rest loop internally, but behind the same contract, so the result shape does not reveal which is which.
 
 Its contract is explicit:
 
