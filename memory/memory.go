@@ -8,7 +8,7 @@ import (
 
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v3/internal/customapm"
-	"github.com/thalesfsp/dal/v3/internal/logging"
+	"github.com/thalesfsp/dal/v3/internal/envelope"
 	"github.com/thalesfsp/dal/v3/internal/shared"
 	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
@@ -18,9 +18,6 @@ import (
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
 	"github.com/thalesfsp/status"
-	"github.com/thalesfsp/sypl/v2"
-	"github.com/thalesfsp/sypl/v2/fields"
-	"github.com/thalesfsp/sypl/v2/level"
 	"github.com/thalesfsp/validation"
 )
 
@@ -84,318 +81,118 @@ func keyMatches(pattern string, key any) (bool, error) {
 
 // Count returns the number of items in the storage.
 func (s *Memory) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
-	//////
-	// APM Tracing.
-	//////
+	return envelope.Run[count.Count, int64](ctx, envelope.Config[count.Count]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Counted.String(),
+		Target:         target,
+		Param:          prm,
+		Options:        options,
+		SuccessCounter: s.GetCounterCounted(),
+		FailureCounter: s.GetCounterCountedFailed(),
+		NewParams: func() (*count.Count, error) {
+			params, err := count.New()
+			if err == nil {
+				params.Search = "*"
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Counted.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*count.Count]()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := count.New()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-	}
-
-	// Application's default values.
-	finalParam.Search = "*"
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Count.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, "", target, nil, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-		}
-	}
-
-	pattern := finalParam.Search
-	if pattern == "" {
-		pattern = "*"
-	}
-
-	count := 0
-
-	var matchErr error
-
-	s.client.Range(func(key, value any) bool {
-		matched, err := keyMatches(pattern, key)
-		if err != nil {
-			matchErr = err
-
-			return false
+			return params, err
+		},
+	}, func(_ context.Context, params *count.Count) (envelope.Result[int64], error) {
+		pattern := params.Search
+		if pattern == "" {
+			pattern = "*"
 		}
 
-		if matched {
-			count++
+		itemCount := 0
+
+		var matchErr error
+
+		s.client.Range(func(key, value any) bool {
+			matched, err := keyMatches(pattern, key)
+			if err != nil {
+				matchErr = err
+
+				return false
+			}
+
+			if matched {
+				itemCount++
+			}
+
+			return true
+		})
+
+		if matchErr != nil {
+			return envelope.Result[int64]{}, matchErr
 		}
 
-		return true
+		result := int64(itemCount)
+
+		return envelope.Result[int64]{Value: result, PostHookData: result}, nil
 	})
-
-	if matchErr != nil {
-		return 0, customapm.TraceError(ctx, matchErr, s.GetLogger(), s.GetCounterCountedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, "", target, int64(count), finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Counted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterCounted().Add(1)
-
-	return int64(count), nil
 }
 
 // Delete removes data.
 func (s *Memory) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterDeletedFailed(),
-		)
-	}
+	_, err := envelope.Run[delete.Delete, envelope.Void](ctx, envelope.Config[delete.Delete]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Deleted.String(),
+		ID:             id,
+		Target:         target,
+		Param:          prm,
+		Options:        options,
+		NewParams:      delete.New,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterDeleted(),
+		FailureCounter: s.GetCounterDeletedFailed(),
+	}, func(_ context.Context, _ *delete.Delete) (envelope.Result[envelope.Void], error) {
+		s.client.Delete(id)
 
-	//////
-	// APM Tracing.
-	//////
+		return envelope.Result[envelope.Void]{}, nil
+	})
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Deleted.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*delete.Delete]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := delete.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-	}
-
-	// Application's default values.
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Delete.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, target, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-		}
-	}
-
-	s.client.Delete(id)
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, target, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Deleted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterDeleted().Add(1)
-
-	return nil
+	return err
 }
 
 // Retrieve data.
 func (s *Memory) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
-		)
-	}
-
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Retrieved.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*retrieve.Retrieve]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
+	_, err := envelope.Run[retrieve.Retrieve, envelope.Void](ctx, envelope.Config[retrieve.Retrieve]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Retrieved.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Param:          prm,
+		Options:        options,
+		NewParams:      retrieve.New,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterRetrieved(),
+		FailureCounter: s.GetCounterRetrievedFailed(),
+	}, func(_ context.Context, _ *retrieve.Retrieve) (envelope.Result[envelope.Void], error) {
+		val, ok := s.client.Load(id)
+		if !ok {
+			return envelope.Result[envelope.Void]{}, customerror.NewNotFoundError(storage.OperationRetrieve.String())
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := retrieve.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Retrieve.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-		}
-	}
-
-	// Retrieve a value
-	val, ok := s.client.Load(id)
-	if !ok {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewNotFoundError(storage.OperationRetrieve.String()),
-			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
-		)
-	}
-
-	b, ok := val.([]byte)
-	if !ok {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
+		b, ok := val.([]byte)
+		if !ok {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
 				storage.OperationRetrieve.String(),
 				customerror.WithError(fmt.Errorf("stored value for id %q is %T, not []byte", id, val)),
-			),
-			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
-		)
-	}
-
-	if err := shared.Unmarshal(b, v); err != nil {
-		return customapm.TraceError(
-			ctx,
-			err,
-			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		if err := shared.Unmarshal(b, v); err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
 
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Retrieved.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterRetrieved().Add(1)
-
-	return nil
+	return err
 }
 
 // List data. Iteration order is unspecified without Sort because sync.Map
@@ -404,124 +201,73 @@ func (s *Memory) Retrieve(ctx context.Context, id, target string, v any, prm *re
 // Search is a glob matched against keys. Sort, Limit, Offset, and Fields are
 // applied to the decoded documents after matching.
 func (s *Memory) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[list.List, envelope.Void](ctx, envelope.Config[list.List]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Listed.String(),
+		Target:         target,
+		HookData:       v,
+		Param:          prm,
+		Options:        options,
+		SuccessCounter: s.GetCounterListed(),
+		FailureCounter: s.GetCounterListedFailed(),
+		NewParams: func() (*list.List, error) {
+			params, err := list.New()
+			if err == nil {
+				params.Search = "*"
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Listed.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*list.List]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := list.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	// Application's default values.
-	finalParam.Search = "*"
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Query.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, "", target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-		}
-	}
-
-	pattern := finalParam.Search
-	if pattern == "" {
-		pattern = "*"
-	}
-
-	var (
-		docs     [][]byte
-		matchErr error
-	)
-
-	s.client.Range(func(key, value any) bool {
-		matched, err := keyMatches(pattern, key)
-		if err != nil {
-			matchErr = err
-
-			return false
+			return params, err
+		},
+	}, func(_ context.Context, params *list.List) (envelope.Result[envelope.Void], error) {
+		pattern := params.Search
+		if pattern == "" {
+			pattern = "*"
 		}
 
-		if !matched {
+		var (
+			docs     [][]byte
+			matchErr error
+		)
+
+		s.client.Range(func(key, value any) bool {
+			matched, err := keyMatches(pattern, key)
+			if err != nil {
+				matchErr = err
+
+				return false
+			}
+
+			if !matched {
+				return true
+			}
+
+			if b, ok := value.([]byte); ok {
+				docs = append(docs, b)
+			}
+
 			return true
+		})
+
+		if matchErr != nil {
+			return envelope.Result[envelope.Void]{}, matchErr
 		}
 
-		if b, ok := value.([]byte); ok {
-			docs = append(docs, b)
+		var err error
+
+		docs, err = shared.ApplyListParams(docs, prm)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
 
-		return true
+		if err := shared.Unmarshal(shared.AssembleItems(docs), v); err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
+
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
 	})
 
-	if matchErr != nil {
-		return customapm.TraceError(ctx, matchErr, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	docs, err = shared.ApplyListParams(docs, prm)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	if err := shared.Unmarshal(shared.AssembleItems(docs), v); err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, "", target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Listed.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterListed().Add(1)
-
-	return nil
+	return err
 }
 
 // Create data.
@@ -529,99 +275,36 @@ func (s *Memory) List(ctx context.Context, target string, v any, prm *list.List,
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
 func (s *Memory) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
-	// The id is the storage key — an empty one would create a record that
-	// Retrieve/Delete/Update (which reject empty ids) could never address.
-	if id == "" {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterCreatedFailed(),
-		)
-	}
+	return envelope.Run[create.Create, string](ctx, envelope.Config[create.Create]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Created.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Param:          prm,
+		Options:        options,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterCreated(),
+		FailureCounter: s.GetCounterCreatedFailed(),
+		NewParams: func() (*create.Create, error) {
+			params, err := create.New()
+			if err == nil {
+				params.TTL = 0
+			}
 
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Created.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*create.Create]()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+			return params, err
+		},
+	}, func(_ context.Context, _ *create.Create) (envelope.Result[string], error) {
+		b, err := shared.Marshal(v)
+		if err != nil {
+			return envelope.Result[string]{}, err
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
+		s.client.Store(id, b)
 
-	finalParam, err := create.New()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	finalParam.TTL = 0
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Create.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-		}
-	}
-
-	b, err := shared.Marshal(v)
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	s.client.Store(id, b)
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Created.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterCreated().Add(1)
-
-	return id, nil
+		return envelope.Result[string]{Value: id, PostHookData: v}, nil
+	})
 }
 
 // BulkCreate creates data in backend-sized chunks. Memory has no native batch
@@ -685,97 +368,38 @@ func (s *Memory) BulkCreate(
 //
 // NOTE: Not truly an update, it's an insert.
 func (s *Memory) Update(ctx context.Context, id, target string, v any, prm *update.Update, options ...storage.Func[*update.Update]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterUpdatedFailed(),
-		)
-	}
+	_, err := envelope.Run[update.Update, envelope.Void](ctx, envelope.Config[update.Update]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Updated.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Param:          prm,
+		Options:        options,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterUpdated(),
+		FailureCounter: s.GetCounterUpdatedFailed(),
+		NewParams: func() (*update.Update, error) {
+			params, err := update.New()
+			if err == nil {
+				params.TTL = 0
+			}
 
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Updated.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*update.Update]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
+			return params, err
+		},
+	}, func(_ context.Context, _ *update.Update) (envelope.Result[envelope.Void], error) {
+		b, err := shared.Marshal(v)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
+		s.client.Store(id, b)
 
-	finalParam, err := update.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	finalParam.TTL = 0
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Update.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-		}
-	}
-
-	b, err := shared.Marshal(v)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	s.client.Store(id, b)
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, target, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Updated.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterUpdated().Add(1)
-
-	return nil
+	return err
 }
 
 // GetClient returns the client.
