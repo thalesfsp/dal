@@ -553,16 +553,139 @@ func (s *S3) List(ctx context.Context, target string, v any, prm *list.List, opt
 	return nil
 }
 
-// BulkCreate creates data in bulk.
+// BulkCreate creates data with at most eight concurrent PUTs. Eight provides
+// useful I/O parallelism without creating a goroutine for every object.
 func (s *S3) BulkCreate(
-	context.Context,
-	string,
-	[]storage.BulkItem,
-	*create.Create,
-	...storage.Func[*create.Create],
+	ctx context.Context,
+	_ string,
+	items []storage.BulkItem,
+	prm *create.Create,
+	options ...storage.Func[*create.Create],
 ) (storage.BulkResult, error) {
-	// TODO(v3): real implementation lands in E2.
-	return storage.BulkResult{}, storage.ErrBulkCreateNotImplemented
+	const concurrencyLimit = 8
+
+	return s.bulkCreate(ctx, items, prm, concurrencyLimit, options...)
+}
+
+func (s *S3) bulkCreate(
+	ctx context.Context,
+	items []storage.BulkItem,
+	prm *create.Create,
+	concurrencyLimit int,
+	options ...storage.Func[*create.Create],
+) (storage.BulkResult, error) {
+	if len(items) == 0 {
+		return storage.BulkResult{}, nil
+	}
+
+	chunks, err := storage.ChunkIndexed(items, concurrencyLimit)
+	if err != nil {
+		return storage.BulkResult{}, err
+	}
+
+	outcomes := make([]error, len(items))
+	stopped := false
+
+	for chunkIndex, chunk := range chunks {
+		if err := ctx.Err(); err != nil {
+			stopped = true
+			markS3BulkFailures(chunks[chunkIndex:], err, outcomes)
+
+			break
+		}
+
+		s.runBulkCreateChunk(ctx, chunk, prm, outcomes, options...)
+
+		if err := ctx.Err(); err != nil {
+			stopped = stopped || s3BulkChunkStopped(chunk, outcomes, err)
+
+			if chunkIndex+1 >= len(chunks) {
+				continue
+			}
+
+			stopped = true
+			markS3BulkFailures(chunks[chunkIndex+1:], err, outcomes)
+
+			break
+		}
+	}
+
+	return assembleS3BulkResult(items, outcomes, stopped)
+}
+
+func (s *S3) runBulkCreateChunk(
+	ctx context.Context,
+	chunk []storage.Indexed[storage.BulkItem],
+	prm *create.Create,
+	outcomes []error,
+	options ...storage.Func[*create.Create],
+) {
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(len(chunk))
+
+	for _, indexed := range chunk {
+		go func() {
+			defer waitGroup.Done()
+
+			if err := ctx.Err(); err != nil {
+				outcomes[indexed.Index] = err
+
+				return
+			}
+
+			_, outcomes[indexed.Index] = s.Create(
+				ctx,
+				indexed.Item.ID,
+				indexed.Item.ID,
+				indexed.Item.Value,
+				prm,
+				options...,
+			)
+		}()
+	}
+
+	waitGroup.Wait()
+}
+
+func markS3BulkFailures(chunks [][]storage.Indexed[storage.BulkItem], err error, outcomes []error) {
+	for _, chunk := range chunks {
+		for _, indexed := range chunk {
+			outcomes[indexed.Index] = err
+		}
+	}
+}
+
+func s3BulkChunkStopped(chunk []storage.Indexed[storage.BulkItem], outcomes []error, stopErr error) bool {
+	for _, indexed := range chunk {
+		if errors.Is(outcomes[indexed.Index], stopErr) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func assembleS3BulkResult(
+	items []storage.BulkItem,
+	outcomes []error,
+	stopped bool,
+) (storage.BulkResult, error) {
+	result := storage.BulkResult{
+		Succeeded: make([]int, 0, len(items)),
+		Stopped:   stopped,
+	}
+
+	for index, err := range outcomes {
+		if err != nil {
+			result.Failures = append(result.Failures, storage.BulkItemError{Index: index, Err: err})
+
+			continue
+		}
+
+		result.Succeeded = append(result.Succeeded, index)
+	}
+
+	return result, result.Err()
 }
 
 // Create data.

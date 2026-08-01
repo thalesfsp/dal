@@ -541,16 +541,57 @@ func (s *File) List(ctx context.Context, target string, v any, prm *list.List, o
 	return nil
 }
 
-// BulkCreate creates data in bulk.
+// BulkCreate creates data in chunks of 25. File has no batch primitive, so
+// each item's ID is used as its file path and written with Create.
 func (s *File) BulkCreate(
-	context.Context,
-	string,
-	[]storage.BulkItem,
-	*create.Create,
-	...storage.Func[*create.Create],
+	ctx context.Context,
+	_ string,
+	items []storage.BulkItem,
+	prm *create.Create,
+	options ...storage.Func[*create.Create],
 ) (storage.BulkResult, error) {
-	// TODO(v3): real implementation lands in E2.
-	return storage.BulkResult{}, storage.ErrBulkCreateNotImplemented
+	const chunkLimit = 25
+
+	if len(items) == 0 {
+		return storage.BulkResult{}, nil
+	}
+
+	chunks, err := storage.ChunkIndexed(items, chunkLimit)
+	if err != nil {
+		return storage.BulkResult{}, err
+	}
+
+	result := storage.BulkResult{Succeeded: make([]int, 0, len(items))}
+
+	for chunkIndex, chunk := range chunks {
+		for itemIndex, indexed := range chunk {
+			if err := ctx.Err(); err != nil {
+				result.Stopped = true
+
+				for _, remaining := range chunk[itemIndex:] {
+					result.Failures = append(result.Failures, storage.BulkItemError{Index: remaining.Index, Err: err})
+				}
+
+				for _, remainingChunk := range chunks[chunkIndex+1:] {
+					for _, remaining := range remainingChunk {
+						result.Failures = append(result.Failures, storage.BulkItemError{Index: remaining.Index, Err: err})
+					}
+				}
+
+				return result, result.Err()
+			}
+
+			if _, err := s.Create(ctx, indexed.Item.ID, indexed.Item.ID, indexed.Item.Value, prm, options...); err != nil {
+				result.Failures = append(result.Failures, storage.BulkItemError{Index: indexed.Index, Err: err})
+
+				continue
+			}
+
+			result.Succeeded = append(result.Succeeded, indexed.Index)
+		}
+	}
+
+	return result, result.Err()
 }
 
 // Create data.
