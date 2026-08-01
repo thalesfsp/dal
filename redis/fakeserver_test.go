@@ -27,9 +27,10 @@ import (
 type fakeRedis struct {
 	listener net.Listener
 
-	mu    sync.Mutex
-	data  map[string]string
-	conns []net.Conn
+	mu            sync.Mutex
+	data          map[string]string
+	conns         []net.Conn
+	rejectSetKeys map[string]bool
 
 	// pageSize is the number of keys returned per SCAN page, so the
 	// client-side cursor loop iterates multiple times.
@@ -47,9 +48,10 @@ func startFakeRedis(t *testing.T) *fakeRedis {
 	require.NoError(t, err)
 
 	f := &fakeRedis{
-		listener: listener,
-		data:     map[string]string{},
-		pageSize: 100,
+		listener:      listener,
+		data:          map[string]string{},
+		rejectSetKeys: map[string]bool{},
+		pageSize:      100,
 	}
 
 	go f.serve()
@@ -145,8 +147,17 @@ func (f *fakeRedis) dispatch(w *bufio.Writer, args []string) {
 		}
 
 		f.mu.Lock()
-		f.data[args[1]] = args[2]
+		rejected := f.rejectSetKeys[args[1]]
+		if !rejected {
+			f.data[args[1]] = args[2]
+		}
 		f.mu.Unlock()
+
+		if rejected {
+			writeErrorReply(w, "ERR rejected by fake")
+
+			return
+		}
 
 		writeSimpleReply(w, "OK")
 	case "GET":

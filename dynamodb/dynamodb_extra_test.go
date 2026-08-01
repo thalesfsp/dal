@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"os"
@@ -43,6 +44,141 @@ type dynamoDoc struct {
 	ID      string `dynamodbav:"id"`
 	Name    string `dynamodbav:"name"`
 	Version string `dynamodbav:"version"`
+}
+
+func dynamoBulkTestItems(count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for i := range items {
+		items[i] = storage.BulkItem{
+			ID: fmt.Sprintf("bulk-item-%d", i),
+			Value: dynamoDoc{
+				Name:    fmt.Sprintf("value-%d", i),
+				Version: "bulk",
+			},
+		}
+	}
+
+	return items
+}
+
+func TestDynamoDBOffline_BulkCreate(t *testing.T) {
+	t.Run("happy path crosses 25 item cap and reads back", func(t *testing.T) {
+		str, fake := sharedTestDynamo(t)
+		table := "bulk-happy"
+		items := dynamoBulkTestItems(dynamoBulkChunkLimit*2 + 5)
+		callsBefore := fake.requestCount("BatchWriteItem")
+
+		result, err := str.BulkCreate(t.Context(), table, items, nil)
+		require.NoError(t, err)
+		assert.True(t, result.AllSucceeded())
+		assert.False(t, result.Stopped)
+		require.Len(t, result.Succeeded, len(items))
+		assert.Equal(t, 3, fake.requestCount("BatchWriteItem")-callsBefore)
+
+		for index, item := range items {
+			assert.Equal(t, index, result.Succeeded[index])
+
+			var got dynamoDoc
+			require.NoError(t, str.Retrieve(t.Context(), item.ID, table, &got, nil))
+			assert.Equal(t, item.ID, got.ID)
+			want, ok := item.Value.(dynamoDoc)
+			require.True(t, ok)
+			assert.Equal(t, want.Name, got.Name)
+		}
+	})
+
+	t.Run("empty input succeeds even with canceled context", func(t *testing.T) {
+		str, _ := sharedTestDynamo(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		result, err := str.BulkCreate(ctx, "bulk-empty", nil, nil)
+		require.NoError(t, err)
+		assert.Equal(t, storage.BulkResult{}, result)
+	})
+
+	t.Run("single item", func(t *testing.T) {
+		str, _ := sharedTestDynamo(t)
+		items := dynamoBulkTestItems(1)
+
+		result, err := str.BulkCreate(t.Context(), "bulk-single", items, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []int{0}, result.Succeeded)
+
+		var got dynamoDoc
+		require.NoError(t, str.Retrieve(t.Context(), items[0].ID, "bulk-single", &got, nil))
+		assert.Equal(t, items[0].ID, got.ID)
+	})
+
+	t.Run("partial preparation failure preserves original index", func(t *testing.T) {
+		str, _ := sharedTestDynamo(t)
+		table := "bulk-partial"
+		items := dynamoBulkTestItems(dynamoBulkChunkLimit + 10)
+		items[27].ID = ""
+
+		result, err := str.BulkCreate(t.Context(), table, items, nil)
+		require.Error(t, err)
+		require.Len(t, result.Failures, 1)
+		assert.Equal(t, 27, result.Failures[0].Index)
+		assert.False(t, result.Stopped)
+		assert.Len(t, result.Succeeded, len(items)-1)
+
+		for index, item := range items {
+			if index == 27 {
+				continue
+			}
+
+			var got dynamoDoc
+			require.NoError(t, str.Retrieve(t.Context(), item.ID, table, &got, nil), "successful item %d was not written", index)
+			assert.Equal(t, item.ID, got.ID)
+		}
+	})
+
+	t.Run("unprocessed item retries twice then succeeds", func(t *testing.T) {
+		str, fake := sharedTestDynamo(t)
+		items := dynamoBulkTestItems(1)
+		fake.mu.Lock()
+		fake.unprocessedRemaining[items[0].ID] = 2
+		fake.mu.Unlock()
+		callsBefore := fake.requestCount("BatchWriteItem")
+
+		result, err := str.BulkCreate(t.Context(), "bulk-unprocessed", items, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []int{0}, result.Succeeded)
+		assert.Empty(t, result.Failures)
+		assert.Equal(t, 3, fake.requestCount("BatchWriteItem")-callsBefore)
+
+		var got dynamoDoc
+		require.NoError(t, str.Retrieve(t.Context(), items[0].ID, "bulk-unprocessed", &got, nil))
+		assert.Equal(t, items[0].ID, got.ID)
+	})
+
+	t.Run("context cancellation keeps completed 25 item batch", func(t *testing.T) {
+		str, _ := sharedTestDynamo(t)
+		table := "bulk-cancel"
+		items := dynamoBulkTestItems(dynamoBulkChunkLimit + 5)
+		ctx, cancel := context.WithCancel(t.Context())
+		postHook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+			cancel()
+
+			return nil
+		}
+
+		result, err := str.BulkCreate(ctx, table, items, nil, storage.WithPostHook(postHook))
+		require.ErrorIs(t, err, context.Canceled)
+		assert.True(t, result.Stopped)
+		require.Len(t, result.Succeeded, dynamoBulkChunkLimit)
+		require.Len(t, result.Failures, 5)
+		for index := range dynamoBulkChunkLimit {
+			assert.Equal(t, index, result.Succeeded[index])
+			var got dynamoDoc
+			require.NoError(t, str.Retrieve(t.Context(), items[index].ID, table, &got, nil))
+		}
+		for offset, failure := range result.Failures {
+			assert.Equal(t, dynamoBulkChunkLimit+offset, failure.Index)
+			assert.ErrorIs(t, failure.Err, context.Canceled)
+		}
+	})
 }
 
 type capturedScanInput struct {

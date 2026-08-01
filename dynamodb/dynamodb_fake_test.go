@@ -50,7 +50,8 @@ type dynamoFake struct {
 	// overrides forces a specific target (e.g. "Scan") to fail.
 	overrides map[string]dynamoOverride
 
-	listTablesFailures int
+	listTablesFailures   int
+	unprocessedRemaining map[string]int
 
 	// scanQueue, when non-empty, overrides Scan's response: each call pops
 	// the next entry (the last one repeats once exhausted), ignoring items.
@@ -64,8 +65,9 @@ type dynamoFake struct {
 // newDynamoFake creates a ready-to-use fake with no stored items.
 func newDynamoFake() *dynamoFake {
 	return &dynamoFake{
-		items:     map[string]map[string]map[string]types.AttributeValue{},
-		overrides: map[string]dynamoOverride{},
+		items:                map[string]map[string]map[string]types.AttributeValue{},
+		overrides:            map[string]dynamoOverride{},
+		unprocessedRemaining: map[string]int{},
 	}
 }
 
@@ -246,6 +248,8 @@ func (f *dynamoFake) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleGetItem(w, body)
 	case "PutItem":
 		f.handlePutItem(w, body)
+	case "BatchWriteItem":
+		f.handleBatchWriteItem(w, body)
 	case "DeleteItem":
 		f.handleDeleteItem(w, body)
 	case "UpdateItem":
@@ -255,6 +259,51 @@ func (f *dynamoFake) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeDynamoError(w, http.StatusBadRequest, "UnknownOperationException", "operation not implemented by fake: "+op)
 	}
+}
+
+func (f *dynamoFake) handleBatchWriteItem(w http.ResponseWriter, body []byte) {
+	var in struct {
+		RequestItems map[string][]struct {
+			PutRequest struct {
+				Item map[string]json.RawMessage `json:"Item"`
+			} `json:"PutRequest"`
+		} `json:"RequestItems"`
+	}
+
+	if err := json.Unmarshal(body, &in); err != nil {
+		writeDynamoError(w, http.StatusBadRequest, "SerializationException", err.Error())
+
+		return
+	}
+
+	unprocessed := make(map[string][]map[string]any)
+	for table, requests := range in.RequestItems {
+		for _, request := range requests {
+			item, err := decodeDynamoItem(request.PutRequest.Item)
+			if err != nil {
+				writeDynamoError(w, http.StatusBadRequest, "SerializationException", err.Error())
+
+				return
+			}
+
+			id := attrString(item["id"])
+			if f.unprocessedRemaining[id] > 0 {
+				f.unprocessedRemaining[id]--
+				unprocessed[table] = append(unprocessed[table], map[string]any{
+					"PutRequest": map[string]any{"Item": encodeDynamoItem(item)},
+				})
+
+				continue
+			}
+
+			if f.items[table] == nil {
+				f.items[table] = map[string]map[string]types.AttributeValue{}
+			}
+			f.items[table][id] = item
+		}
+	}
+
+	writeDynamoJSON(w, map[string]any{"UnprocessedItems": unprocessed})
 }
 
 func (f *dynamoFake) requestCount(target string) int {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -24,6 +25,120 @@ import (
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
 )
+
+type elasticsearchBulkTestDocument struct {
+	Value string `json:"value"`
+}
+
+func elasticsearchBulkTestItems(count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for i := range items {
+		items[i] = storage.BulkItem{
+			ID:    fmt.Sprintf("bulk-item-%d", i),
+			Value: elasticsearchBulkTestDocument{Value: fmt.Sprintf("value-%d", i)},
+		}
+	}
+
+	return items
+}
+
+func TestElasticSearchOffline_BulkCreate(t *testing.T) {
+	t.Run("happy path crosses chunk limit and reads back", func(t *testing.T) {
+		es, _, srv := newTestES(t, "bulk-index")
+		items := elasticsearchBulkTestItems(elasticsearchBulkChunkLimit*2 + 5)
+
+		result, err := es.BulkCreate(t.Context(), "", items, nil)
+		require.NoError(t, err)
+		assert.True(t, result.AllSucceeded())
+		assert.False(t, result.Stopped)
+		require.Len(t, result.Succeeded, len(items))
+		assert.Equal(t, 3, srv.CountPath(http.MethodPost, "/bulk-index/_bulk"))
+
+		for index, item := range items {
+			assert.Equal(t, index, result.Succeeded[index])
+
+			var got elasticsearchBulkTestDocument
+			require.NoError(t, es.Retrieve(t.Context(), item.ID, "", &got, nil))
+			assert.Equal(t, item.Value, got)
+		}
+	})
+
+	t.Run("empty input succeeds even with canceled context", func(t *testing.T) {
+		es, _, _ := newTestES(t, "bulk-empty")
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		result, err := es.BulkCreate(ctx, "", nil, nil)
+		require.NoError(t, err)
+		assert.Equal(t, storage.BulkResult{}, result)
+	})
+
+	t.Run("single item", func(t *testing.T) {
+		es, _, _ := newTestES(t, "bulk-single")
+		items := elasticsearchBulkTestItems(1)
+
+		result, err := es.BulkCreate(t.Context(), "", items, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []int{0}, result.Succeeded)
+
+		var got elasticsearchBulkTestDocument
+		require.NoError(t, es.Retrieve(t.Context(), items[0].ID, "", &got, nil))
+		assert.Equal(t, items[0].Value, got)
+	})
+
+	t.Run("HTTP 200 per-item errors preserve original indices", func(t *testing.T) {
+		es, store, _ := newTestES(t, "bulk-partial")
+		items := elasticsearchBulkTestItems(elasticsearchBulkChunkLimit + 35)
+		store.rejectIDs[items[7].ID] = http.StatusBadRequest
+		store.rejectIDs[items[127].ID] = http.StatusTooManyRequests
+
+		result, err := es.BulkCreate(t.Context(), "", items, nil)
+		require.Error(t, err)
+		require.Len(t, result.Failures, 2)
+		assert.Equal(t, 7, result.Failures[0].Index)
+		assert.Equal(t, 127, result.Failures[1].Index)
+		assert.False(t, result.Stopped)
+		assert.Len(t, result.Succeeded, len(items)-2)
+
+		for index, item := range items {
+			var got elasticsearchBulkTestDocument
+			retrieveErr := es.Retrieve(t.Context(), item.ID, "", &got, nil)
+			if index == 7 || index == 127 {
+				require.Error(t, retrieveErr, "failed item %d was written", index)
+
+				continue
+			}
+			require.NoError(t, retrieveErr, "successful item %d was not written", index)
+			assert.Equal(t, item.Value, got)
+		}
+	})
+
+	t.Run("context cancellation keeps completed chunk", func(t *testing.T) {
+		es, _, _ := newTestES(t, "bulk-cancel")
+		items := elasticsearchBulkTestItems(elasticsearchBulkChunkLimit + 5)
+		ctx, cancel := context.WithCancel(t.Context())
+		postHook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+			cancel()
+
+			return nil
+		}
+
+		result, err := es.BulkCreate(ctx, "", items, nil, storage.WithPostHook(postHook))
+		require.ErrorIs(t, err, context.Canceled)
+		assert.True(t, result.Stopped)
+		require.Len(t, result.Succeeded, elasticsearchBulkChunkLimit)
+		require.Len(t, result.Failures, 5)
+		for index := range elasticsearchBulkChunkLimit {
+			assert.Equal(t, index, result.Succeeded[index])
+			var got elasticsearchBulkTestDocument
+			require.NoError(t, es.Retrieve(t.Context(), items[index].ID, "", &got, nil))
+		}
+		for offset, failure := range result.Failures {
+			assert.Equal(t, elasticsearchBulkChunkLimit+offset, failure.Index)
+			assert.ErrorIs(t, failure.Err, context.Canceled)
+		}
+	})
+}
 
 //////
 // Offline (no ENVIRONMENT gating) tests exercising the real ElasticSearch

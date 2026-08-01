@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"expvar"
+	"fmt"
 	"runtime"
 	"testing"
 	"time"
@@ -43,6 +44,156 @@ type testDoc struct {
 	ID      string `bson:"_id"     json:"id"`
 	Name    string `bson:"name"    json:"name"`
 	Version string `bson:"version" json:"version"`
+}
+
+func mongoBulkTestItems(count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for i := range items {
+		items[i] = storage.BulkItem{
+			ID: fmt.Sprintf("bulk-item-%d", i),
+			Value: testDoc{
+				ID:      fmt.Sprintf("bulk-item-%d", i),
+				Name:    fmt.Sprintf("value-%d", i),
+				Version: "bulk",
+			},
+		}
+	}
+
+	return items
+}
+
+func mongoBulkReadResponses(items []storage.BulkItem, failed map[int]bool) []bson.D {
+	responses := make([]bson.D, 0, len(items))
+	for index, item := range items {
+		if failed[index] {
+			responses = append(responses, mockCreateCursorResponse(0, mockFirstBatch))
+
+			continue
+		}
+		doc, ok := item.Value.(testDoc)
+		if !ok {
+			panic(fmt.Sprintf("mongo bulk test item %d has type %T, want testDoc", index, item.Value))
+		}
+		responses = append(responses, mockCreateCursorResponse(0, mockFirstBatch, bson.D{
+			{Key: "_id", Value: doc.ID},
+			{Key: "name", Value: doc.Name},
+			{Key: "version", Value: doc.Version},
+		}))
+	}
+
+	return responses
+}
+
+func TestMongoDBOffline_BulkCreate(t *testing.T) {
+	t.Run("happy path crosses adapter chunk limit and reads back", func(t *testing.T) {
+		st, dep := newMockedStorage(t)
+		items := mongoBulkTestItems(mongoBulkChunkLimit*2 + 5)
+		dep.addResponses(
+			mockCreateSuccessResponse(),
+			mockCreateSuccessResponse(),
+			mockCreateSuccessResponse(),
+		)
+
+		result, err := st.BulkCreate(t.Context(), testColl, items, nil)
+		require.NoError(t, err)
+		assert.True(t, result.AllSucceeded())
+		assert.False(t, result.Stopped)
+		require.Len(t, result.Succeeded, len(items))
+
+		dep.addResponses(mongoBulkReadResponses(items, nil)...)
+		for index, item := range items {
+			assert.Equal(t, index, result.Succeeded[index])
+
+			var got testDoc
+			require.NoError(t, st.Retrieve(t.Context(), item.ID, testColl, &got, nil))
+			assert.Equal(t, item.Value, got)
+		}
+	})
+
+	t.Run("empty input succeeds even with canceled context", func(t *testing.T) {
+		st, _ := newMockedStorage(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		result, err := st.BulkCreate(ctx, testColl, nil, nil)
+		require.NoError(t, err)
+		assert.Equal(t, storage.BulkResult{}, result)
+	})
+
+	t.Run("single item", func(t *testing.T) {
+		st, dep := newMockedStorage(t)
+		items := mongoBulkTestItems(1)
+		dep.addResponses(mockCreateSuccessResponse())
+
+		result, err := st.BulkCreate(t.Context(), testColl, items, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []int{0}, result.Succeeded)
+
+		dep.addResponses(mongoBulkReadResponses(items, nil)...)
+		var got testDoc
+		require.NoError(t, st.Retrieve(t.Context(), items[0].ID, testColl, &got, nil))
+		assert.Equal(t, items[0].Value, got)
+	})
+
+	t.Run("unordered write errors preserve original indices", func(t *testing.T) {
+		st, dep := newMockedStorage(t)
+		items := mongoBulkTestItems(mongoBulkChunkLimit + 35)
+		dep.addResponses(
+			mockCreateWriteErrorsResponse(mockWriteError{Index: 7, Code: 11000, Message: "duplicate key"}),
+			mockCreateWriteErrorsResponse(mockWriteError{Index: 27, Code: 11000, Message: "duplicate key"}),
+		)
+
+		result, err := st.BulkCreate(t.Context(), testColl, items, nil)
+		require.Error(t, err)
+		require.Len(t, result.Failures, 2)
+		assert.Equal(t, 7, result.Failures[0].Index)
+		assert.Equal(t, 127, result.Failures[1].Index)
+		assert.False(t, result.Stopped)
+		assert.Len(t, result.Succeeded, len(items)-2)
+
+		failed := map[int]bool{7: true, 127: true}
+		dep.addResponses(mongoBulkReadResponses(items, failed)...)
+		for index, item := range items {
+			var got testDoc
+			retrieveErr := st.Retrieve(t.Context(), item.ID, testColl, &got, nil)
+			if failed[index] {
+				require.Error(t, retrieveErr, "failed item %d was written", index)
+
+				continue
+			}
+			require.NoError(t, retrieveErr, "successful item %d was not written", index)
+			assert.Equal(t, item.Value, got)
+		}
+	})
+
+	t.Run("context cancellation keeps completed InsertMany chunk", func(t *testing.T) {
+		st, dep := newMockedStorage(t)
+		items := mongoBulkTestItems(mongoBulkChunkLimit + 5)
+		dep.addResponses(mockCreateSuccessResponse())
+		ctx, cancel := context.WithCancel(t.Context())
+		postHook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+			cancel()
+
+			return nil
+		}
+
+		result, err := st.BulkCreate(ctx, testColl, items, nil, storage.WithPostHook(postHook))
+		require.ErrorIs(t, err, context.Canceled)
+		assert.True(t, result.Stopped)
+		require.Len(t, result.Succeeded, mongoBulkChunkLimit)
+		require.Len(t, result.Failures, 5)
+
+		dep.addResponses(mongoBulkReadResponses(items[:mongoBulkChunkLimit], nil)...)
+		for index := range mongoBulkChunkLimit {
+			assert.Equal(t, index, result.Succeeded[index])
+			var got testDoc
+			require.NoError(t, st.Retrieve(t.Context(), items[index].ID, testColl, &got, nil))
+		}
+		for offset, failure := range result.Failures {
+			assert.Equal(t, mongoBulkChunkLimit+offset, failure.Index)
+			assert.ErrorIs(t, failure.Err, context.Canceled)
+		}
+	})
 }
 
 // newMockedStorage builds a fully-initialized adapter through New() (covering
