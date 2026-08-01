@@ -14,7 +14,7 @@ import (
 	"github.com/pkg/sftp"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v3/internal/customapm"
-	"github.com/thalesfsp/dal/v3/internal/logging"
+	"github.com/thalesfsp/dal/v3/internal/envelope"
 	"github.com/thalesfsp/dal/v3/internal/shared"
 	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
@@ -24,9 +24,6 @@ import (
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
 	"github.com/thalesfsp/status"
-	"github.com/thalesfsp/sypl/v2"
-	"github.com/thalesfsp/sypl/v2/fields"
-	"github.com/thalesfsp/sypl/v2/level"
 	"github.com/thalesfsp/validation"
 	"golang.org/x/crypto/ssh"
 )
@@ -101,365 +98,175 @@ type SFTP struct {
 
 // Count returns the number of items in the storage.
 func (s *SFTP) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Counted.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*count.Count]()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
+	hookTarget := target
+	if hookTarget == "" {
+		hookTarget = s.Target
 	}
 
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-		}
-	}
+	var trgt string
 
-	//////
-	// Params initialization.
-	//////
+	return envelope.Run[count.Count, int64](ctx, envelope.Config[count.Count]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Counted.String(),
+		Target:         hookTarget,
+		Options:        options,
+		SuccessCounter: s.GetCounterCounted(),
+		FailureCounter: s.GetCounterCountedFailed(),
+		NewParams: func() (*count.Count, error) {
+			params, err := count.New()
+			if err != nil {
+				return nil, err
+			}
 
-	finalParam, err := count.New()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-	}
+			params.Search = "*"
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-	// Application's default values.
-	finalParam.Search = "*"
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Filter.
-	//////
-
-	// Don't write into the caller's prm — copy the pattern, defaulting an
-	// empty one to match-all.
-	pattern := finalParam.Search
-	if pattern == "" {
-		pattern = "*"
-	}
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-	}
-
-	//////
-	// Count.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, "", trgt, nil, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-		}
-	}
-
-	files, err := s.Client.ReadDir(trgt)
-	if err != nil {
-		return 0, customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCount.String(), customerror.WithError(err)),
-			s.GetLogger(),
-			s.GetCounterCountedFailed(),
-		)
-	}
-
-	count := 0
-
-	for _, file := range files {
-		if file.IsDir() {
-			continue
+			return params, err
+		},
+	}, func(_ context.Context, params *count.Count) (envelope.Result[int64], error) {
+		// Don't write into the caller's prm — copy the pattern, defaulting an
+		// empty one to match-all.
+		pattern := params.Search
+		if pattern == "" {
+			pattern = "*"
 		}
 
-		matched, err := path.Match(pattern, file.Name())
+		files, err := s.Client.ReadDir(trgt)
 		if err != nil {
-			return 0, customapm.TraceError(
-				ctx,
-				customerror.NewInvalidError("search pattern", customerror.WithError(err)),
-				s.GetLogger(),
-				s.GetCounterCountedFailed(),
+			return envelope.Result[int64]{}, customerror.NewFailedToError(
+				storage.OperationCount.String(),
+				customerror.WithError(err),
 			)
 		}
 
-		if matched {
-			count++
+		fileCount := 0
+
+		for _, file := range files {
+			if file.IsDir() {
+				continue
+			}
+
+			matched, err := path.Match(pattern, file.Name())
+			if err != nil {
+				return envelope.Result[int64]{}, customerror.NewInvalidError(
+					"search pattern",
+					customerror.WithError(err),
+				)
+			}
+
+			if matched {
+				fileCount++
+			}
 		}
-	}
 
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, "", trgt, count, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCountedFailed())
-		}
-	}
+		result := int64(fileCount)
 
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Counted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterCounted().Add(1)
-
-	return int64(count), nil
+		return envelope.Result[int64]{Value: result, PostHookData: fileCount}, nil
+	})
 }
 
 // Delete removes data.
 func (s *SFTP) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterDeletedFailed(),
-		)
+	hookTarget := target
+	if hookTarget == "" {
+		hookTarget = s.Target
 	}
 
-	//////
-	// APM Tracing.
-	//////
+	var trgt string
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Deleted.String(),
-	)
-	defer span.End()
+	_, err := envelope.Run[delete.Delete, envelope.Void](ctx, envelope.Config[delete.Delete]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Deleted.String(),
+		ID:             id,
+		Target:         hookTarget,
+		Options:        options,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterDeleted(),
+		FailureCounter: s.GetCounterDeletedFailed(),
+		NewParams: func() (*delete.Delete, error) {
+			params, err := delete.New()
+			if err != nil {
+				return nil, err
+			}
 
-	//////
-	// Options initialization.
-	//////
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-	o, err := storage.NewOptions[*delete.Delete]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := delete.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-	}
-
-	//////
-	// Delete.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, trgt, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-		}
-	}
-
-	if err := s.Client.Remove(trgt); err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError(
-					storage.OperationDelete.String(),
-					customerror.WithError(err),
-				),
-				s.GetLogger(),
-				s.GetCounterDeletedFailed(),
+			return params, err
+		},
+	}, func(_ context.Context, _ *delete.Delete) (envelope.Result[envelope.Void], error) {
+		if err := s.Client.Remove(trgt); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationDelete.String(),
+				customerror.WithError(err),
 			)
 		}
-	}
 
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, trgt, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterDeletedFailed())
-		}
-	}
+		return envelope.Result[envelope.Void]{}, nil
+	})
 
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Deleted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterDeleted().Add(1)
-
-	return nil
+	return err
 }
 
 // Retrieve data.
 func (s *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
-		)
+	hookTarget := target
+	if hookTarget == "" {
+		hookTarget = s.Target
 	}
 
-	//////
-	// APM Tracing.
-	//////
+	var trgt string
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Retrieved.String(),
-	)
-	defer span.End()
+	_, err := envelope.Run[retrieve.Retrieve, envelope.Void](ctx, envelope.Config[retrieve.Retrieve]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Retrieved.String(),
+		ID:             id,
+		Target:         hookTarget,
+		HookData:       v,
+		Options:        options,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterRetrieved(),
+		FailureCounter: s.GetCounterRetrievedFailed(),
+		NewParams: func() (*retrieve.Retrieve, error) {
+			params, err := retrieve.New()
+			if err != nil {
+				return nil, err
+			}
 
-	//////
-	// Options initialization.
-	//////
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-	o, err := storage.NewOptions[*retrieve.Retrieve]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
+			return params, err
+		},
+	}, func(_ context.Context, _ *retrieve.Retrieve) (envelope.Result[envelope.Void], error) {
+		srcFile, err := s.Client.Open(trgt)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationRetrieve.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
+		defer srcFile.Close()
 
-	finalParam, err := retrieve.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-	}
-
-	//////
-	// Retrieve.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
+		content, err := shared.ReadAll(srcFile)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
 
-	srcFile, err := s.Client.Open(trgt)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationRetrieve.String(), customerror.WithError(err)),
-			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
-		)
-	}
-
-	defer srcFile.Close()
-
-	content, err := shared.ReadAll(srcFile)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
-	}
-
-	// Convert content to `v`.
-	if err := shared.Unmarshal(content, v); err != nil {
-		return customapm.TraceError(
-			ctx,
-			err,
-			s.GetLogger(),
-			s.GetCounterRetrievedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterRetrievedFailed())
+		// Convert content to `v`.
+		if err := shared.Unmarshal(content, v); err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Retrieved.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterRetrieved().Add(1)
-
-	return nil
+	return err
 }
 
 // List data.
@@ -467,145 +274,91 @@ func (s *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 // Search is a glob matched against filenames. Sort, Limit, Offset, and Fields
 // are applied to the decoded documents after matching.
 func (s *SFTP) List(ctx context.Context, target string, v any, prm *list.List, opts ...storage.Func[*list.List]) error {
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Listed.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*list.List]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
+	hookTarget := target
+	if hookTarget == "" {
+		hookTarget = s.Target
 	}
 
-	// Iterate over the options and apply them against params.
-	for _, option := range opts {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-		}
-	}
+	var trgt string
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := list.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	// Application's default values.
-	finalParam.Search = "*"
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	//////
-	// Query.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, "", trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-		}
-	}
-
-	files, err := s.Client.ReadDir(trgt)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationList.String(), customerror.WithError(err)),
-			s.GetLogger(),
-			s.GetCounterListedFailed(),
-		)
-	}
-
-	docs := make([][]byte, 0, len(files))
-
-	// The documented contract is that Search filters the listing (Count
-	// already honors it). An empty search means match-all.
-	pattern := finalParam.Search
-	if pattern == "" {
-		pattern = "*"
-	}
-
-	for _, file := range files {
-		if file.IsDir() {
-			continue
-		}
-
-		matched, err := path.Match(pattern, file.Name())
-		if err != nil {
-			return customapm.TraceError(ctx, customerror.NewFailedToError(
-				storage.OperationList.String(),
-				customerror.WithError(err),
-			), s.GetLogger(), s.GetCounterListedFailed())
-		}
-
-		if matched {
-			doc, err := readFile(s.Client, path.Join(trgt, file.Name()))
+	_, err := envelope.Run[list.List, envelope.Void](ctx, envelope.Config[list.List]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Listed.String(),
+		Target:         hookTarget,
+		HookData:       v,
+		Options:        opts,
+		SuccessCounter: s.GetCounterListed(),
+		FailureCounter: s.GetCounterListedFailed(),
+		NewParams: func() (*list.List, error) {
+			params, err := list.New()
 			if err != nil {
-				return customapm.TraceError(ctx, customerror.NewFailedToError(
-					storage.OperationList.String(),
-					customerror.WithError(err),
-				), s.GetLogger(), s.GetCounterListedFailed())
+				return nil, err
 			}
 
-			docs = append(docs, doc)
+			params.Search = "*"
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
+
+			return params, err
+		},
+	}, func(_ context.Context, params *list.List) (envelope.Result[envelope.Void], error) {
+		files, err := s.Client.ReadDir(trgt)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationList.String(),
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	docs, err = shared.ApplyListParams(docs, prm)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
+		docs := make([][]byte, 0, len(files))
 
-	if err := shared.Unmarshal(shared.AssembleItems(docs), v); err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, "", trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterListedFailed())
+		// The documented contract is that Search filters the listing (Count
+		// already honors it). An empty search means match-all.
+		pattern := params.Search
+		if pattern == "" {
+			pattern = "*"
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		for _, file := range files {
+			if file.IsDir() {
+				continue
+			}
 
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Listed.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
+			matched, err := path.Match(pattern, file.Name())
+			if err != nil {
+				return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+					storage.OperationList.String(),
+					customerror.WithError(err),
+				)
+			}
 
-	//////
-	// Metrics.
-	//////
+			if matched {
+				doc, err := readFile(s.Client, path.Join(trgt, file.Name()))
+				if err != nil {
+					return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+						storage.OperationList.String(),
+						customerror.WithError(err),
+					)
+				}
 
-	s.GetCounterListed().Add(1)
+				docs = append(docs, doc)
+			}
+		}
 
-	return nil
+		docs, err = shared.ApplyListParams(docs, prm)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
+
+		if err := shared.Unmarshal(shared.AssembleItems(docs), v); err != nil {
+			return envelope.Result[envelope.Void]{}, err
+		}
+
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
+
+	return err
 }
 
 // BulkCreate creates data with at most eight concurrent SFTP writes. Eight
@@ -748,257 +501,131 @@ func assembleSFTPBulkResult(
 // NOTE: Not all storages returns the ID, neither all storages requires `id` to
 // be set. You are better off setting the ID yourself.
 func (s *SFTP) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Created.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*create.Create]()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+	hookTarget := target
+	if hookTarget == "" {
+		hookTarget = s.Target
 	}
 
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+	var trgt string
+
+	return envelope.Run[create.Create, string](ctx, envelope.Config[create.Create]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Created.String(),
+		ID:             id,
+		Target:         hookTarget,
+		HookData:       v,
+		Options:        options,
+		SuccessCounter: s.GetCounterCreated(),
+		FailureCounter: s.GetCounterCreatedFailed(),
+		NewParams: func() (*create.Create, error) {
+			params, err := create.New()
+			if err != nil {
+				return nil, err
+			}
+
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
+
+			return params, err
+		},
+	}, func(_ context.Context, _ *create.Create) (envelope.Result[string], error) {
+		b, err := shared.Marshal(v)
+		if err != nil {
+			return envelope.Result[string]{}, err
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := create.New()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	//////
-	// Create.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, trgt, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-		}
-	}
-
-	b, err := shared.Marshal(v)
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
-	}
-
-	dstFile, err := s.Client.Create(trgt)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return "", customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
-				s.GetLogger(),
-				s.GetCounterCreatedFailed(),
+		dstFile, err := s.Client.Create(trgt)
+		if err != nil && !os.IsNotExist(err) {
+			return envelope.Result[string]{}, customerror.NewFailedToError(
+				storage.OperationCreate.String(),
+				customerror.WithError(err),
 			)
 		}
-	}
 
-	if dstFile == nil {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCreate.String()+" file, it's nil"),
-			s.GetLogger(),
-			s.GetCounterCreatedFailed(),
-		)
-	}
-
-	defer dstFile.Close()
-
-	if _, err := dstFile.Write(b); err != nil {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
-			s.GetLogger(),
-			s.GetCounterCreatedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, trgt, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+		if dstFile == nil {
+			return envelope.Result[string]{}, customerror.NewFailedToError(
+				storage.OperationCreate.String() + " file, it's nil",
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		defer dstFile.Close()
 
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Created.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
+		if _, err := dstFile.Write(b); err != nil {
+			return envelope.Result[string]{}, customerror.NewFailedToError(
+				storage.OperationCreate.String(),
+				customerror.WithError(err),
+			)
+		}
 
-	//////
-	// Metrics.
-	//////
-
-	s.GetCounterCreated().Add(1)
-
-	return id, nil
+		return envelope.Result[string]{Value: id, PostHookData: v}, nil
+	})
 }
 
 // Update data.
 func (s *SFTP) Update(ctx context.Context, id, target string, v any, prm *update.Update, opts ...storage.Func[*update.Update]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			s.GetLogger(),
-			s.GetCounterUpdatedFailed(),
-		)
+	hookTarget := target
+	if hookTarget == "" {
+		hookTarget = s.Target
 	}
 
-	//////
-	// APM Tracing.
-	//////
+	var trgt string
 
-	ctx, span := customapm.Trace(
-		ctx,
-		s.GetType(),
-		Name,
-		status.Updated.String(),
-	)
-	defer span.End()
+	_, err := envelope.Run[update.Update, envelope.Void](ctx, envelope.Config[update.Update]{
+		Storage:        s,
+		Adapter:        Name,
+		Status:         status.Updated.String(),
+		ID:             id,
+		Target:         hookTarget,
+		HookData:       v,
+		Options:        opts,
+		RequiresID:     true,
+		SuccessCounter: s.GetCounterUpdated(),
+		FailureCounter: s.GetCounterUpdatedFailed(),
+		NewParams: func() (*update.Update, error) {
+			params, err := update.New()
+			if err != nil {
+				return nil, err
+			}
 
-	//////
-	// Options initialization.
-	//////
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, s.Target)
 
-	o, err := storage.NewOptions[*update.Update]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range opts {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
+			return params, err
+		},
+	}, func(_ context.Context, _ *update.Update) (envelope.Result[envelope.Void], error) {
+		b, err := shared.Marshal(v)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, err
 		}
-	}
 
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := update.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, s.Target)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	//////
-	// Update.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, s, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-		}
-	}
-
-	b, err := shared.Marshal(v)
-	if err != nil {
-		return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
-	}
-
-	dstFile, err := s.Client.Create(trgt)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
-				s.GetLogger(),
-				s.GetCounterUpdatedFailed(),
+		dstFile, err := s.Client.Create(trgt)
+		if err != nil && !os.IsNotExist(err) {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationUpdate.String(),
+				customerror.WithError(err),
 			)
 		}
-	}
 
-	if dstFile == nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationUpdate.String()+" file, it's nil"),
-			s.GetLogger(),
-			s.GetCounterUpdatedFailed(),
-		)
-	}
-
-	defer dstFile.Close()
-
-	if _, err := dstFile.Write(b); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
-			s.GetLogger(),
-			s.GetCounterUpdatedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, s, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterUpdatedFailed())
+		if dstFile == nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationUpdate.String() + " file, it's nil",
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		defer dstFile.Close()
 
-	// Correlates the transaction, span and log, and logs it.
-	s.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Updated.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
+		if _, err := dstFile.Write(b); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationUpdate.String(),
+				customerror.WithError(err),
+			)
+		}
 
-	//////
-	// Metrics.
-	//////
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	s.GetCounterUpdated().Add(1)
-
-	return nil
+	return err
 }
 
 // GetClient returns the client.
