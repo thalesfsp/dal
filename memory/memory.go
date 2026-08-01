@@ -401,10 +401,8 @@ func (s *Memory) Retrieve(ctx context.Context, id, target string, v any, prm *re
 // List data. Iteration order is unspecified without Sort because sync.Map
 // does not define an iteration order.
 //
-// NOTE: It uses params.List.Search to query the data.
-//
-// NOTE: Memory does not support the concept of "offset" and "limit" in the same
-// way that a traditional SQL database does.
+// Search is a glob matched against keys. Sort, Limit, Offset, and Fields are
+// applied to the decoded documents after matching.
 func (s *Memory) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.

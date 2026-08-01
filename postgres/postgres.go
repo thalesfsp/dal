@@ -500,7 +500,8 @@ func (p *Postgres) Retrieve(ctx context.Context, id, target string, v any, prm *
 
 // List data.
 //
-// NOTE: It uses param.List.Search to query the data.
+// Search is executed as the SQL query. Sort, Limit, Offset, and Fields are not
+// translated into SQL; include them in Search when needed.
 func (p *Postgres) List(ctx context.Context, target string, v any, prm *list.List, options ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.

@@ -464,11 +464,8 @@ func (s *SFTP) Retrieve(ctx context.Context, id, target string, v any, prm *retr
 
 // List data.
 //
-// WARN: In general, projections that include non-indexed fields or fields
-// that are part of a covered index (i.e., an index that includes all the
-// projected fields) are less likely to impact performance.
-//
-// NOTE: It uses param.List.Search to query the data.
+// Search is a glob matched against filenames. Sort, Limit, Offset, and Fields
+// are applied to the decoded documents after matching.
 func (s *SFTP) List(ctx context.Context, target string, v any, prm *list.List, opts ...storage.Func[*list.List]) error {
 	//////
 	// APM Tracing.
