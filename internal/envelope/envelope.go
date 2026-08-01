@@ -35,6 +35,19 @@ type Config[P shared.Param] struct {
 	Target   string
 	HookData any
 
+	// ResolveTarget, when set, computes the target after params are merged and
+	// before the hooks run — inside the span, so a resolution failure is traced
+	// like any other. Its result replaces Target for both hooks and is passed to
+	// the body.
+	//
+	// It exists because the adapters differ on this: some have a fixed target,
+	// while the SQL adapters derive one from the caller's argument and their own
+	// configured default via shared.TargetName. Resolving before Run would move
+	// the failure outside the span, and resolving inside body would run the
+	// pre-hook too early and hand it an unresolved target. Both are behaviour
+	// changes, so the resolution point has to sit here.
+	ResolveTarget func() (string, error)
+
 	Param      *P
 	Options    []storage.Func[*P]
 	NewParams  func() (*P, error)
@@ -97,12 +110,23 @@ func Run[P shared.Param, R any](
 
 	params = shared.MergeParams(params, config.Param)
 
+	target := config.Target
+
+	if config.ResolveTarget != nil {
+		resolved, err := config.ResolveTarget()
+		if err != nil {
+			return fail(err)
+		}
+
+		target = resolved
+	}
+
 	if options.PreHookFunc != nil {
 		if err := options.PreHookFunc(
 			ctx,
 			config.Storage,
 			config.ID,
-			config.Target,
+			target,
 			config.HookData,
 			params,
 		); err != nil {
@@ -120,7 +144,7 @@ func Run[P shared.Param, R any](
 			ctx,
 			config.Storage,
 			config.ID,
-			config.Target,
+			target,
 			result.PostHookData,
 			params,
 		); err != nil {
