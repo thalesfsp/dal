@@ -57,6 +57,121 @@ func (c *closeErrorConn) Close() error {
 // errHookBoom is returned by failing test hooks.
 var errHookBoom = errors.New("hook boom")
 
+type redisBulkTestDocument struct {
+	Value string `json:"value"`
+}
+
+func redisBulkTestItems(count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for i := range items {
+		items[i] = storage.BulkItem{
+			ID:    fmt.Sprintf("bulk-item-%d", i),
+			Value: redisBulkTestDocument{Value: fmt.Sprintf("value-%d", i)},
+		}
+	}
+
+	return items
+}
+
+func TestRedisOffline_BulkCreate(t *testing.T) {
+	t.Run("happy path crosses pipeline chunk limit and reads back", func(t *testing.T) {
+		_, str := newOfflineStorage(t)
+		items := redisBulkTestItems(redisBulkChunkLimit*2 + 5)
+
+		result, err := str.BulkCreate(t.Context(), "", items, nil)
+		require.NoError(t, err)
+		assert.True(t, result.AllSucceeded())
+		assert.False(t, result.Stopped)
+		require.Len(t, result.Succeeded, len(items))
+
+		for index, item := range items {
+			assert.Equal(t, index, result.Succeeded[index])
+
+			var got redisBulkTestDocument
+			require.NoError(t, str.Retrieve(t.Context(), item.ID, "", &got, nil))
+			assert.Equal(t, item.Value, got)
+		}
+	})
+
+	t.Run("empty input succeeds even with canceled context", func(t *testing.T) {
+		_, str := newOfflineStorage(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		result, err := str.BulkCreate(ctx, "", nil, nil)
+		require.NoError(t, err)
+		assert.Equal(t, storage.BulkResult{}, result)
+	})
+
+	t.Run("single item", func(t *testing.T) {
+		_, str := newOfflineStorage(t)
+		items := redisBulkTestItems(1)
+
+		result, err := str.BulkCreate(t.Context(), "", items, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []int{0}, result.Succeeded)
+
+		var got redisBulkTestDocument
+		require.NoError(t, str.Retrieve(t.Context(), items[0].ID, "", &got, nil))
+		assert.Equal(t, items[0].Value, got)
+	})
+
+	t.Run("per-command errors preserve original indices", func(t *testing.T) {
+		fake, str := newOfflineStorage(t)
+		items := redisBulkTestItems(redisBulkChunkLimit + 35)
+		fake.mu.Lock()
+		fake.rejectSetKeys[items[7].ID] = true
+		fake.rejectSetKeys[items[127].ID] = true
+		fake.mu.Unlock()
+
+		result, err := str.BulkCreate(t.Context(), "", items, nil)
+		require.Error(t, err)
+		require.Len(t, result.Failures, 2)
+		assert.Equal(t, 7, result.Failures[0].Index)
+		assert.Equal(t, 127, result.Failures[1].Index)
+		assert.False(t, result.Stopped)
+		assert.Len(t, result.Succeeded, len(items)-2)
+
+		for index, item := range items {
+			var got redisBulkTestDocument
+			retrieveErr := str.Retrieve(t.Context(), item.ID, "", &got, nil)
+			if index == 7 || index == 127 {
+				require.Error(t, retrieveErr, "failed item %d was written", index)
+
+				continue
+			}
+			require.NoError(t, retrieveErr, "successful item %d was not written", index)
+			assert.Equal(t, item.Value, got)
+		}
+	})
+
+	t.Run("context cancellation keeps completed pipeline chunk", func(t *testing.T) {
+		_, str := newOfflineStorage(t)
+		items := redisBulkTestItems(redisBulkChunkLimit + 5)
+		ctx, cancel := context.WithCancel(t.Context())
+		postHook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+			cancel()
+
+			return nil
+		}
+
+		result, err := str.BulkCreate(ctx, "", items, nil, storage.WithPostHook(postHook))
+		require.ErrorIs(t, err, context.Canceled)
+		assert.True(t, result.Stopped)
+		require.Len(t, result.Succeeded, redisBulkChunkLimit)
+		require.Len(t, result.Failures, 5)
+		for index := range redisBulkChunkLimit {
+			assert.Equal(t, index, result.Succeeded[index])
+			var got redisBulkTestDocument
+			require.NoError(t, str.Retrieve(t.Context(), items[index].ID, "", &got, nil))
+		}
+		for offset, failure := range result.Failures {
+			assert.Equal(t, redisBulkChunkLimit+offset, failure.Index)
+			assert.ErrorIs(t, failure.Err, context.Canceled)
+		}
+	})
+}
+
 func TestRedisOffline_Close(t *testing.T) {
 	t.Run("closes client and is idempotent", func(t *testing.T) {
 		_, str := newOfflineStorage(t)
