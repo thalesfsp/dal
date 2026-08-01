@@ -17,7 +17,7 @@ import (
 	"github.com/eapache/go-resiliency/retrier"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v3/internal/customapm"
-	"github.com/thalesfsp/dal/v3/internal/logging"
+	"github.com/thalesfsp/dal/v3/internal/envelope"
 	"github.com/thalesfsp/dal/v3/internal/shared"
 	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
@@ -28,9 +28,6 @@ import (
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
 	"github.com/thalesfsp/status"
-	"github.com/thalesfsp/sypl/v2"
-	"github.com/thalesfsp/sypl/v2/fields"
-	"github.com/thalesfsp/sypl/v2/level"
 	"github.com/thalesfsp/validation"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -113,428 +110,234 @@ func ToDynamoDBSort(s customsort.Sort) (bool, error) {
 	return true, nil // ScanIndexForward = true for ascending
 }
 
+// dynamoEnvelopeOptions passes the table name resolved inside Run to the
+// user's hooks without moving target resolution outside the traced envelope.
+func dynamoEnvelopeOptions[T any](target *string, options []storage.Func[T]) []storage.Func[T] {
+	result := make([]storage.Func[T], 0, len(options)+1)
+	result = append(result, options...)
+	result = append(result, func(o *storage.Options[T]) error {
+		if preHook := o.PreHookFunc; preHook != nil {
+			o.PreHookFunc = func(ctx context.Context, strg storage.IStorage, id, _ string, data any, param T) error {
+				return preHook(ctx, strg, id, *target, data, param)
+			}
+		}
+
+		if postHook := o.PostHookFunc; postHook != nil {
+			o.PostHookFunc = func(ctx context.Context, strg storage.IStorage, id, _ string, data any, param T) error {
+				return postHook(ctx, strg, id, *target, data, param)
+			}
+		}
+
+		return nil
+	})
+
+	return result
+}
+
 //////
 // Implements the IStorage interface.
 //////
 
 // Count returns the number of items in the storage.
 func (d *DynamoDB) Count(ctx context.Context, target string, prm *count.Count, options ...storage.Func[*count.Count]) (int64, error) {
-	//////
-	// APM Tracing.
-	//////
+	var trgt string
 
-	ctx, span := customapm.Trace(
-		ctx,
-		d.GetType(),
-		Name,
-		status.Counted.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*count.Count]()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCountedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return 0, customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCountedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := count.New()
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCountedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, d.Target())
-	if err != nil {
-		return 0, customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCountedFailed())
-	}
-
-	//////
-	// Count.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, d, "", trgt, nil, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCountedFailed())
-		}
-	}
-
-	// Prepare scan input
-	scanInput := &awsdynamodb.ScanInput{
-		TableName: aws.String(trgt),
-		Select:    types.SelectCount,
-	}
-
-	// Add filter if search is provided
-	if finalParam.Search != "" {
-		filterMap := map[string]any{}
-		if err := shared.Unmarshal([]byte(finalParam.Search), &filterMap); err != nil {
-			return 0, customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError("unmarshal search filter", customerror.WithError(err)),
-				d.GetLogger(),
-				d.GetCounterCountedFailed(),
-			)
-		}
-
-		// Build filter expression for DynamoDB
-		var filterExpressions []string
-		expressionAttributeNames := make(map[string]string)
-		expressionAttributeValues := make(map[string]types.AttributeValue)
-
-		for key, value := range filterMap {
-			placeholder := sanitizePlaceholder(key)
-
-			attrName := fmt.Sprintf("#%s", placeholder)
-			attrValue := fmt.Sprintf(":%s", placeholder)
-
-			filterExpressions = append(filterExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
-			expressionAttributeNames[attrName] = key
-
-			av, err := attributevalue.Marshal(value)
+	return envelope.Run[count.Count, int64](ctx, envelope.Config[count.Count]{
+		Storage:        d,
+		Adapter:        Name,
+		Status:         status.Counted.String(),
+		Target:         target,
+		Options:        dynamoEnvelopeOptions(&trgt, options),
+		SuccessCounter: d.GetCounterCounted(),
+		FailureCounter: d.GetCounterCountedFailed(),
+		NewParams: func() (*count.Count, error) {
+			params, err := count.New()
 			if err != nil {
-				return 0, customapm.TraceError(
-					ctx,
-					customerror.NewFailedToError("marshal filter value", customerror.WithError(err)),
-					d.GetLogger(),
-					d.GetCounterCountedFailed(),
+				return nil, err
+			}
+
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, d.Target())
+
+			return params, err
+		},
+	}, func(ctx context.Context, params *count.Count) (envelope.Result[int64], error) {
+		scanInput := &awsdynamodb.ScanInput{
+			TableName: aws.String(trgt),
+			Select:    types.SelectCount,
+		}
+
+		if params.Search != "" {
+			filterMap := map[string]any{}
+			if err := shared.Unmarshal([]byte(params.Search), &filterMap); err != nil {
+				return envelope.Result[int64]{}, customerror.NewFailedToError(
+					"unmarshal search filter",
+					customerror.WithError(err),
 				)
 			}
-			expressionAttributeValues[attrValue] = av
+
+			var filterExpressions []string
+			expressionAttributeNames := make(map[string]string)
+			expressionAttributeValues := make(map[string]types.AttributeValue)
+
+			for key, value := range filterMap {
+				placeholder := sanitizePlaceholder(key)
+				attrName := fmt.Sprintf("#%s", placeholder)
+				attrValue := fmt.Sprintf(":%s", placeholder)
+
+				filterExpressions = append(filterExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
+				expressionAttributeNames[attrName] = key
+
+				av, err := attributevalue.Marshal(value)
+				if err != nil {
+					return envelope.Result[int64]{}, customerror.NewFailedToError(
+						"marshal filter value",
+						customerror.WithError(err),
+					)
+				}
+				expressionAttributeValues[attrValue] = av
+			}
+
+			if len(filterExpressions) > 0 {
+				scanInput.FilterExpression = aws.String(strings.Join(filterExpressions, " AND "))
+				scanInput.ExpressionAttributeNames = expressionAttributeNames
+				scanInput.ExpressionAttributeValues = expressionAttributeValues
+			}
 		}
 
-		if len(filterExpressions) > 0 {
-			scanInput.FilterExpression = aws.String(strings.Join(filterExpressions, " AND "))
-			scanInput.ExpressionAttributeNames = expressionAttributeNames
-			scanInput.ExpressionAttributeValues = expressionAttributeValues
-		}
-	}
+		var resultCount int64
+		paginator := awsdynamodb.NewScanPaginator(d.Client, scanInput)
+		for paginator.HasMorePages() {
+			result, err := paginator.NextPage(ctx)
+			if err != nil {
+				return envelope.Result[int64]{}, customerror.NewFailedToError(
+					storage.OperationCount.String(),
+					customerror.WithError(err),
+				)
+			}
 
-	// Scan pages are capped at 1MB — paginate to count the whole table.
-	var count int64
-
-	paginator := awsdynamodb.NewScanPaginator(d.Client, scanInput)
-	for paginator.HasMorePages() {
-		result, err := paginator.NextPage(ctx)
-		if err != nil {
-			return 0, customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError(storage.OperationCount.String(), customerror.WithError(err)),
-				d.GetLogger(),
-				d.GetCounterCountedFailed(),
-			)
+			resultCount += int64(result.Count)
 		}
 
-		count += int64(result.Count)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, d, "", trgt, count, finalParam); err != nil {
-			return 0, customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCountedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	d.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Counted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	d.GetCounterCounted().Add(1)
-
-	return count, nil
+		return envelope.Result[int64]{Value: resultCount, PostHookData: resultCount}, nil
+	})
 }
 
 // Delete removes data.
 func (d *DynamoDB) Delete(ctx context.Context, id, target string, prm *delete.Delete, options ...storage.Func[*delete.Delete]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			d.GetLogger(),
-			d.GetCounterDeletedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[delete.Delete, envelope.Void](ctx, envelope.Config[delete.Delete]{
+		Storage:        d,
+		Adapter:        Name,
+		Status:         status.Deleted.String(),
+		ID:             id,
+		Target:         target,
+		Options:        dynamoEnvelopeOptions(&trgt, options),
+		RequiresID:     true,
+		SuccessCounter: d.GetCounterDeleted(),
+		FailureCounter: d.GetCounterDeletedFailed(),
+		NewParams: func() (*delete.Delete, error) {
+			params, err := delete.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		d.GetType(),
-		Name,
-		status.Deleted.String(),
-	)
-	defer span.End()
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, d.Target())
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*delete.Delete]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterDeletedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterDeletedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := delete.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterDeletedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, d.Target())
-	if err != nil {
-		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterDeletedFailed())
-	}
-
-	//////
-	// Delete.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, d, id, trgt, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterDeletedFailed())
-		}
-	}
-
-	key, err := attributevalue.Marshal(id)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("marshal primary key", customerror.WithError(err)),
-			d.GetLogger(),
-			d.GetCounterDeletedFailed(),
-		)
-	}
-
-	deleteInput := &awsdynamodb.DeleteItemInput{
-		TableName: aws.String(trgt),
-		Key: map[string]types.AttributeValue{
-			d.PrimaryKey: key,
+			return params, err
 		},
-	}
+	}, func(ctx context.Context, _ *delete.Delete) (envelope.Result[envelope.Void], error) {
+		key, err := attributevalue.Marshal(id)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				"marshal primary key",
+				customerror.WithError(err),
+			)
+		}
 
-	if _, err := d.Client.DeleteItem(ctx, deleteInput); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(
+		if _, err := d.Client.DeleteItem(ctx, &awsdynamodb.DeleteItemInput{
+			TableName: aws.String(trgt),
+			Key: map[string]types.AttributeValue{
+				d.PrimaryKey: key,
+			},
+		}); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
 				storage.OperationDelete.String(),
 				customerror.WithError(err),
-			),
-			d.GetLogger(),
-			d.GetCounterDeletedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, d, id, trgt, nil, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterDeletedFailed())
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		return envelope.Result[envelope.Void]{}, nil
+	})
 
-	// Correlates the transaction, span and log, and logs it.
-	d.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Deleted.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	d.GetCounterDeleted().Add(1)
-
-	return nil
+	return err
 }
 
 // Retrieve data.
 func (d *DynamoDB) Retrieve(ctx context.Context, id, target string, v any, prm *retrieve.Retrieve, options ...storage.Func[*retrieve.Retrieve]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			d.GetLogger(),
-			d.GetCounterRetrievedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[retrieve.Retrieve, envelope.Void](ctx, envelope.Config[retrieve.Retrieve]{
+		Storage:        d,
+		Adapter:        Name,
+		Status:         status.Retrieved.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        dynamoEnvelopeOptions(&trgt, options),
+		RequiresID:     true,
+		SuccessCounter: d.GetCounterRetrieved(),
+		FailureCounter: d.GetCounterRetrievedFailed(),
+		NewParams: func() (*retrieve.Retrieve, error) {
+			params, err := retrieve.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		d.GetType(),
-		Name,
-		status.Retrieved.String(),
-	)
-	defer span.End()
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, d.Target())
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*retrieve.Retrieve]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterRetrievedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterRetrievedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := retrieve.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterRetrievedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, d.Target())
-	if err != nil {
-		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterRetrievedFailed())
-	}
-
-	//////
-	// Retrieve.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, d, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterRetrievedFailed())
-		}
-	}
-
-	key, err := attributevalue.Marshal(id)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("marshal primary key", customerror.WithError(err)),
-			d.GetLogger(),
-			d.GetCounterRetrievedFailed(),
-		)
-	}
-
-	getInput := &awsdynamodb.GetItemInput{
-		TableName: aws.String(trgt),
-		Key: map[string]types.AttributeValue{
-			d.PrimaryKey: key,
+			return params, err
 		},
-	}
-
-	result, err := d.Client.GetItem(ctx, getInput)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationRetrieve.String(), customerror.WithError(err)),
-			d.GetLogger(),
-			d.GetCounterRetrievedFailed(),
-		)
-	}
-
-	if len(result.Item) == 0 {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewNotFoundError("item not found"),
-			d.GetLogger(),
-			d.GetCounterRetrievedFailed(),
-		)
-	}
-
-	// Convert DynamoDB item to Go value.
-	if err := attributevalue.UnmarshalMap(result.Item, v); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("unmarshal result", customerror.WithError(err)),
-			d.GetLogger(),
-			d.GetCounterRetrievedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, d, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterRetrievedFailed())
+	}, func(ctx context.Context, _ *retrieve.Retrieve) (envelope.Result[envelope.Void], error) {
+		key, err := attributevalue.Marshal(id)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				"marshal primary key",
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		result, err := d.Client.GetItem(ctx, &awsdynamodb.GetItemInput{
+			TableName: aws.String(trgt),
+			Key: map[string]types.AttributeValue{
+				d.PrimaryKey: key,
+			},
+		})
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationRetrieve.String(),
+				customerror.WithError(err),
+			)
+		}
 
-	// Correlates the transaction, span and log, and logs it.
-	d.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Retrieved.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
+		if len(result.Item) == 0 {
+			return envelope.Result[envelope.Void]{}, customerror.NewNotFoundError("item not found")
+		}
 
-	//////
-	// Metrics.
-	//////
+		if err := attributevalue.UnmarshalMap(result.Item, v); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				"unmarshal result",
+				customerror.WithError(err),
+			)
+		}
 
-	d.GetCounterRetrieved().Add(1)
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	return nil
+	return err
 }
 
 // List data.
@@ -542,215 +345,134 @@ func (d *DynamoDB) Retrieve(ctx context.Context, id, target string, v any, prm *
 // Any accepts a map[string]any for DynamoDB filter expressions. Limit, Offset,
 // and Fields are applied; Sort is not currently used.
 //
-//nolint:gocognit,cyclop,funlen,maintidx
+//nolint:gocognit
 func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.List, opts ...storage.Func[*list.List]) error {
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		d.GetType(),
-		Name,
-		status.Listed.String(),
+	var (
+		trgt      string
+		scanInput *awsdynamodb.ScanInput
 	)
-	defer span.End()
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*list.List]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterListedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range opts {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterListedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := list.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterListedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, d.Target())
-	if err != nil {
-		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterListedFailed())
-	}
-
-	//////
-	// Query preparation.
-	//////
-
-	// NOTE: Do NOT set Select=COUNT here: List must return the items
-	// themselves. (Select=COUNT makes DynamoDB omit Items entirely, and it is
-	// invalid when combined with a ProjectionExpression.)
-	scanInput := &awsdynamodb.ScanInput{
-		TableName: aws.String(trgt),
-	}
-
-	// Fields projection
-	if len(finalParam.Fields) > 0 {
-		var projectionExpressions []string
-		expressionAttributeNames := make(map[string]string)
-
-		for _, field := range finalParam.Fields {
-			attrName := fmt.Sprintf("#%s", sanitizePlaceholder(field))
-			projectionExpressions = append(projectionExpressions, attrName)
-			expressionAttributeNames[attrName] = field
-		}
-
-		scanInput.ProjectionExpression = aws.String(strings.Join(projectionExpressions, ", "))
-		scanInput.ExpressionAttributeNames = expressionAttributeNames
-	}
-
-	// Limit
-	if finalParam.Limit > 0 {
-		if finalParam.Limit > math.MaxInt32 {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError("limit exceeds DynamoDB maximum"),
-				d.GetLogger(),
-				d.GetCounterListedFailed(),
-			)
-		}
-
-		scanInput.Limit = aws.Int32(int32(finalParam.Limit))
-	}
-
-	// Filter
-	if filter, ok := finalParam.Any.(map[string]any); ok && len(filter) > 0 {
-		var filterExpressions []string
-		if scanInput.ExpressionAttributeNames == nil {
-			scanInput.ExpressionAttributeNames = make(map[string]string)
-		}
-		expressionAttributeValues := make(map[string]types.AttributeValue)
-
-		for key, value := range filter {
-			placeholder := sanitizePlaceholder(key)
-
-			attrName := fmt.Sprintf("#f%s", placeholder)
-			attrValue := fmt.Sprintf(":f%s", placeholder)
-
-			filterExpressions = append(filterExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
-			scanInput.ExpressionAttributeNames[attrName] = key
-
-			av, err := attributevalue.Marshal(value)
+	_, err := envelope.Run[list.List, envelope.Void](ctx, envelope.Config[list.List]{
+		Storage:        d,
+		Adapter:        Name,
+		Status:         status.Listed.String(),
+		Target:         target,
+		HookData:       v,
+		Options:        dynamoEnvelopeOptions(&trgt, opts),
+		SuccessCounter: d.GetCounterListed(),
+		FailureCounter: d.GetCounterListedFailed(),
+		NewParams: func() (*list.List, error) {
+			params, err := list.New()
 			if err != nil {
-				return customapm.TraceError(
-					ctx,
-					customerror.NewFailedToError("marshal filter value", customerror.WithError(err)),
-					d.GetLogger(),
-					d.GetCounterListedFailed(),
+				return nil, err
+			}
+
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, d.Target())
+			if err != nil {
+				return nil, err
+			}
+
+			scanInput = &awsdynamodb.ScanInput{TableName: aws.String(trgt)}
+
+			if len(params.Fields) > 0 {
+				var projectionExpressions []string
+				expressionAttributeNames := make(map[string]string)
+
+				for _, field := range params.Fields {
+					attrName := fmt.Sprintf("#%s", sanitizePlaceholder(field))
+					projectionExpressions = append(projectionExpressions, attrName)
+					expressionAttributeNames[attrName] = field
+				}
+
+				scanInput.ProjectionExpression = aws.String(strings.Join(projectionExpressions, ", "))
+				scanInput.ExpressionAttributeNames = expressionAttributeNames
+			}
+
+			if params.Limit > 0 {
+				if params.Limit > math.MaxInt32 {
+					return nil, customerror.NewFailedToError("limit exceeds DynamoDB maximum")
+				}
+
+				scanInput.Limit = aws.Int32(int32(params.Limit))
+			}
+
+			if filter, ok := params.Any.(map[string]any); ok && len(filter) > 0 {
+				var filterExpressions []string
+				if scanInput.ExpressionAttributeNames == nil {
+					scanInput.ExpressionAttributeNames = make(map[string]string)
+				}
+				expressionAttributeValues := make(map[string]types.AttributeValue)
+
+				for key, value := range filter {
+					placeholder := sanitizePlaceholder(key)
+					attrName := fmt.Sprintf("#f%s", placeholder)
+					attrValue := fmt.Sprintf(":f%s", placeholder)
+
+					filterExpressions = append(filterExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
+					scanInput.ExpressionAttributeNames[attrName] = key
+
+					av, err := attributevalue.Marshal(value)
+					if err != nil {
+						return nil, customerror.NewFailedToError(
+							"marshal filter value",
+							customerror.WithError(err),
+						)
+					}
+					expressionAttributeValues[attrValue] = av
+				}
+
+				if len(filterExpressions) > 0 {
+					scanInput.FilterExpression = aws.String(strings.Join(filterExpressions, " AND "))
+					scanInput.ExpressionAttributeValues = expressionAttributeValues
+				}
+			}
+
+			return params, nil
+		},
+	}, func(ctx context.Context, params *list.List) (envelope.Result[envelope.Void], error) {
+		var allItems []map[string]types.AttributeValue
+		currentOffset := 0
+
+		paginator := awsdynamodb.NewScanPaginator(d.Client, scanInput)
+		for paginator.HasMorePages() {
+			result, err := paginator.NextPage(ctx)
+			if err != nil {
+				return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+					storage.OperationList.String(),
+					customerror.WithError(err),
 				)
 			}
-			expressionAttributeValues[attrValue] = av
-		}
 
-		if len(filterExpressions) > 0 {
-			scanInput.FilterExpression = aws.String(strings.Join(filterExpressions, " AND "))
-			scanInput.ExpressionAttributeValues = expressionAttributeValues
-		}
-	}
+			for _, item := range result.Items {
+				if currentOffset < params.Offset {
+					currentOffset++
 
-	//////
-	// Query execution.
-	//////
+					continue
+				}
 
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, d, "", trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterListedFailed())
-		}
-	}
-
-	var allItems []map[string]types.AttributeValue
-
-	// Handle pagination and offset
-	currentOffset := 0
-	targetOffset := finalParam.Offset
-
-	paginator := awsdynamodb.NewScanPaginator(d.Client, scanInput)
-	for paginator.HasMorePages() {
-		result, err := paginator.NextPage(ctx)
-		if err != nil {
-			return customapm.TraceError(
-				ctx,
-				customerror.NewFailedToError(storage.OperationList.String(), customerror.WithError(err)),
-				d.GetLogger(),
-				d.GetCounterListedFailed(),
-			)
-		}
-
-		// Handle offset by skipping items
-		for _, item := range result.Items {
-			if currentOffset < targetOffset {
-				currentOffset++
-
-				continue
+				allItems = append(allItems, item)
+				if params.Limit > 0 && len(allItems) >= params.Limit {
+					break
+				}
 			}
 
-			allItems = append(allItems, item)
-
-			// Break if we've reached the limit
-			if finalParam.Limit > 0 && len(allItems) >= finalParam.Limit {
+			if params.Limit > 0 && len(allItems) >= params.Limit {
 				break
 			}
 		}
 
-		// Break if we have enough items or no more pages
-		if finalParam.Limit > 0 && len(allItems) >= finalParam.Limit {
-			break
+		if err := attributevalue.UnmarshalListOfMaps(allItems, v); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				"unmarshal results",
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	// Convert to the target type
-	if err := attributevalue.UnmarshalListOfMaps(allItems, v); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("unmarshal results", customerror.WithError(err)),
-			d.GetLogger(),
-			d.GetCounterListedFailed(),
-		)
-	}
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
 
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, d, "", trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterListedFailed())
-		}
-	}
-
-	//////
-	// Logging
-	//////
-
-	// Correlates the transaction, span and log, and logs it.
-	d.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Listed.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	d.GetCounterListed().Add(1)
-
-	return nil
+	return err
 }
 
 // Create data.
@@ -759,322 +481,168 @@ func (d *DynamoDB) List(ctx context.Context, target string, v any, prm *list.Lis
 //
 //nolint:gocognit,nestif
 func (d *DynamoDB) Create(ctx context.Context, id, target string, v any, prm *create.Create, options ...storage.Func[*create.Create]) (string, error) {
-	if id == "" {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			d.GetLogger(),
-			d.GetCounterCreatedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
-
-	ctx, span := customapm.Trace(
-		ctx,
-		d.GetType(),
-		Name,
-		status.Created.String(),
-	)
-	defer span.End()
-
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*create.Create]()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCreatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range options {
-		if err := option(o); err != nil {
-			return "", customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCreatedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := create.New()
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCreatedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, d.Target())
-	if err != nil {
-		return "", customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCreatedFailed())
-	}
-
-	//////
-	// Create.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, d, id, trgt, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCreatedFailed())
-		}
-	}
-
-	// Ensure the primary key is set in the item
-	val := reflect.ValueOf(v)
-	if val.Kind() == reflect.Pointer {
-		val = val.Elem()
-	}
-
-	if val.Kind() == reflect.Struct {
-		// Find the primary key field and set it
-		for i := range val.NumField() {
-			field := val.Type().Field(i)
-
-			// Check various tag formats for the primary key
-			jsonTag := field.Tag.Get("json")
-			dynamoTag := field.Tag.Get("dynamodbav")
-
-			// Clean up JSON tag (remove omitempty, etc.)
-			if jsonTag != "" {
-				jsonTag = strings.Split(jsonTag, ",")[0]
-			}
-			if dynamoTag != "" {
-				dynamoTag = strings.Split(dynamoTag, ",")[0]
+	return envelope.Run[create.Create, string](ctx, envelope.Config[create.Create]{
+		Storage:        d,
+		Adapter:        Name,
+		Status:         status.Created.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        dynamoEnvelopeOptions(&trgt, options),
+		RequiresID:     true,
+		SuccessCounter: d.GetCounterCreated(),
+		FailureCounter: d.GetCounterCreatedFailed(),
+		NewParams: func() (*create.Create, error) {
+			params, err := create.New()
+			if err != nil {
+				return nil, err
 			}
 
-			if field.Name == cases.Title(language.English).String(d.PrimaryKey) ||
-				jsonTag == d.PrimaryKey ||
-				dynamoTag == d.PrimaryKey ||
-				strings.EqualFold(field.Name, d.PrimaryKey) {
-				if val.Field(i).CanSet() && val.Field(i).Kind() == reflect.String {
-					val.Field(i).SetString(id)
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, d.Target())
+
+			return params, err
+		},
+	}, func(ctx context.Context, _ *create.Create) (envelope.Result[string], error) {
+		val := reflect.ValueOf(v)
+		if val.Kind() == reflect.Pointer {
+			val = val.Elem()
+		}
+
+		if val.Kind() == reflect.Struct {
+			for i := range val.NumField() {
+				field := val.Type().Field(i)
+				jsonTag := field.Tag.Get("json")
+				dynamoTag := field.Tag.Get("dynamodbav")
+
+				if jsonTag != "" {
+					jsonTag = strings.Split(jsonTag, ",")[0]
+				}
+				if dynamoTag != "" {
+					dynamoTag = strings.Split(dynamoTag, ",")[0]
 				}
 
-				break
+				if field.Name == cases.Title(language.English).String(d.PrimaryKey) ||
+					jsonTag == d.PrimaryKey ||
+					dynamoTag == d.PrimaryKey ||
+					strings.EqualFold(field.Name, d.PrimaryKey) {
+					if val.Field(i).CanSet() && val.Field(i).Kind() == reflect.String {
+						val.Field(i).SetString(id)
+					}
+
+					break
+				}
 			}
 		}
-	}
 
-	item, err := attributevalue.MarshalMap(v)
-	if err != nil {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("marshal item", customerror.WithError(err)),
-			d.GetLogger(),
-			d.GetCounterCreatedFailed(),
-		)
-	}
-
-	putInput := &awsdynamodb.PutItemInput{
-		TableName: aws.String(trgt),
-		Item:      item,
-	}
-
-	if _, err := d.Client.PutItem(ctx, putInput); err != nil {
-		return "", customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
-			d.GetLogger(),
-			d.GetCounterCreatedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, d, id, trgt, v, finalParam); err != nil {
-			return "", customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterCreatedFailed())
+		item, err := attributevalue.MarshalMap(v)
+		if err != nil {
+			return envelope.Result[string]{}, customerror.NewFailedToError(
+				"marshal item",
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		if _, err := d.Client.PutItem(ctx, &awsdynamodb.PutItemInput{
+			TableName: aws.String(trgt),
+			Item:      item,
+		}); err != nil {
+			return envelope.Result[string]{}, customerror.NewFailedToError(
+				storage.OperationCreate.String(),
+				customerror.WithError(err),
+			)
+		}
 
-	// Correlates the transaction, span and log, and logs it.
-	d.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Created.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
-
-	//////
-	// Metrics.
-	//////
-
-	d.GetCounterCreated().Add(1)
-
-	return id, nil
+		return envelope.Result[string]{Value: id, PostHookData: v}, nil
+	})
 }
 
 // Update data.
 func (d *DynamoDB) Update(ctx context.Context, id, target string, v any, prm *update.Update, opts ...storage.Func[*update.Update]) error {
-	if id == "" {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewRequiredError("id"),
-			d.GetLogger(),
-			d.GetCounterUpdatedFailed(),
-		)
-	}
+	var trgt string
 
-	//////
-	// APM Tracing.
-	//////
+	_, err := envelope.Run[update.Update, envelope.Void](ctx, envelope.Config[update.Update]{
+		Storage:        d,
+		Adapter:        Name,
+		Status:         status.Updated.String(),
+		ID:             id,
+		Target:         target,
+		HookData:       v,
+		Options:        dynamoEnvelopeOptions(&trgt, opts),
+		RequiresID:     true,
+		SuccessCounter: d.GetCounterUpdated(),
+		FailureCounter: d.GetCounterUpdatedFailed(),
+		NewParams: func() (*update.Update, error) {
+			params, err := update.New()
+			if err != nil {
+				return nil, err
+			}
 
-	ctx, span := customapm.Trace(
-		ctx,
-		d.GetType(),
-		Name,
-		status.Updated.String(),
-	)
-	defer span.End()
+			params = shared.MergeParams(params, prm)
+			trgt, err = shared.TargetName(target, d.Target())
 
-	//////
-	// Options initialization.
-	//////
-
-	o, err := storage.NewOptions[*update.Update]()
-	if err != nil {
-		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterUpdatedFailed())
-	}
-
-	// Iterate over the options and apply them against params.
-	for _, option := range opts {
-		if err := option(o); err != nil {
-			return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterUpdatedFailed())
-		}
-	}
-
-	//////
-	// Params initialization.
-	//////
-
-	finalParam, err := update.New()
-	if err != nil {
-		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterUpdatedFailed())
-	}
-
-	finalParam = shared.MergeParams(finalParam, prm)
-
-	//////
-	// Target definition.
-	//////
-
-	trgt, err := shared.TargetName(target, d.Target())
-	if err != nil {
-		return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterUpdatedFailed())
-	}
-
-	//////
-	// Update.
-	//////
-
-	if o.PreHookFunc != nil {
-		if err := o.PreHookFunc(ctx, d, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterUpdatedFailed())
-		}
-	}
-
-	// Marshal the value to get all fields
-	item, err := attributevalue.MarshalMap(v)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("marshal update item", customerror.WithError(err)),
-			d.GetLogger(),
-			d.GetCounterUpdatedFailed(),
-		)
-	}
-
-	// Build update expression
-	updateExpressions := make([]string, 0, len(item))
-	expressionAttributeNames := make(map[string]string)
-	expressionAttributeValues := make(map[string]types.AttributeValue)
-
-	for key, value := range item {
-		// Skip the primary key in updates
-		if key == d.PrimaryKey {
-			continue
-		}
-
-		placeholder := sanitizePlaceholder(key)
-
-		attrName := fmt.Sprintf("#%s", placeholder)
-		attrValue := fmt.Sprintf(":%s", placeholder)
-
-		updateExpressions = append(updateExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
-		expressionAttributeNames[attrName] = key
-		expressionAttributeValues[attrValue] = value
-	}
-
-	if len(updateExpressions) == 0 {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("no fields to update"),
-			d.GetLogger(),
-			d.GetCounterUpdatedFailed(),
-		)
-	}
-
-	key, err := attributevalue.Marshal(id)
-	if err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError("marshal primary key", customerror.WithError(err)),
-			d.GetLogger(),
-			d.GetCounterUpdatedFailed(),
-		)
-	}
-
-	updateInput := &awsdynamodb.UpdateItemInput{
-		TableName: aws.String(trgt),
-		Key: map[string]types.AttributeValue{
-			d.PrimaryKey: key,
+			return params, err
 		},
-		UpdateExpression:          aws.String("SET " + strings.Join(updateExpressions, ", ")),
-		ExpressionAttributeNames:  expressionAttributeNames,
-		ExpressionAttributeValues: expressionAttributeValues,
-	}
-
-	if _, err := d.Client.UpdateItem(ctx, updateInput); err != nil {
-		return customapm.TraceError(
-			ctx,
-			customerror.NewFailedToError(storage.OperationUpdate.String(), customerror.WithError(err)),
-			d.GetLogger(),
-			d.GetCounterUpdatedFailed(),
-		)
-	}
-
-	if o.PostHookFunc != nil {
-		if err := o.PostHookFunc(ctx, d, id, trgt, v, finalParam); err != nil {
-			return customapm.TraceError(ctx, err, d.GetLogger(), d.GetCounterUpdatedFailed())
+	}, func(ctx context.Context, _ *update.Update) (envelope.Result[envelope.Void], error) {
+		item, err := attributevalue.MarshalMap(v)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				"marshal update item",
+				customerror.WithError(err),
+			)
 		}
-	}
 
-	//////
-	// Logging
-	//////
+		updateExpressions := make([]string, 0, len(item))
+		expressionAttributeNames := make(map[string]string)
+		expressionAttributeValues := make(map[string]types.AttributeValue)
 
-	// Correlates the transaction, span and log, and logs it.
-	d.GetLogger().PrintlnWithOptions(
-		level.Debug,
-		status.Updated.String(),
-		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
-	)
+		for key, value := range item {
+			if key == d.PrimaryKey {
+				continue
+			}
 
-	//////
-	// Metrics.
-	//////
+			placeholder := sanitizePlaceholder(key)
+			attrName := fmt.Sprintf("#%s", placeholder)
+			attrValue := fmt.Sprintf(":%s", placeholder)
 
-	d.GetCounterUpdated().Add(1)
+			updateExpressions = append(updateExpressions, fmt.Sprintf("%s = %s", attrName, attrValue))
+			expressionAttributeNames[attrName] = key
+			expressionAttributeValues[attrValue] = value
+		}
 
-	return nil
+		if len(updateExpressions) == 0 {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError("no fields to update")
+		}
+
+		key, err := attributevalue.Marshal(id)
+		if err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				"marshal primary key",
+				customerror.WithError(err),
+			)
+		}
+
+		if _, err := d.Client.UpdateItem(ctx, &awsdynamodb.UpdateItemInput{
+			TableName: aws.String(trgt),
+			Key: map[string]types.AttributeValue{
+				d.PrimaryKey: key,
+			},
+			UpdateExpression:          aws.String("SET " + strings.Join(updateExpressions, ", ")),
+			ExpressionAttributeNames:  expressionAttributeNames,
+			ExpressionAttributeValues: expressionAttributeValues,
+		}); err != nil {
+			return envelope.Result[envelope.Void]{}, customerror.NewFailedToError(
+				storage.OperationUpdate.String(),
+				customerror.WithError(err),
+			)
+		}
+
+		return envelope.Result[envelope.Void]{PostHookData: v}, nil
+	})
+
+	return err
 }
 
 // GetClient returns the client.
