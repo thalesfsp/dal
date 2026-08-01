@@ -1,9 +1,12 @@
 package file
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 
@@ -11,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v3/internal/shared"
+	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/customsort"
@@ -19,6 +23,131 @@ import (
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
 )
+
+type fileBulkDocument struct {
+	Value string `json:"value"`
+}
+
+func fileBulkItems(dir string, count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for index := range items {
+		items[index] = storage.BulkItem{
+			ID:    filepath.Join(dir, fmt.Sprintf("item-%d.json", index)),
+			Value: fileBulkDocument{Value: fmt.Sprintf("value-%d", index)},
+		}
+	}
+
+	return items
+}
+
+func TestFileBulkCreateHappyPathManyItems(t *testing.T) {
+	str := newTestStorage(t)
+	items := fileBulkItems(t.TempDir(), 60)
+
+	result, err := str.BulkCreate(t.Context(), "unused", items, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(items), len(result.Succeeded))
+	require.Empty(t, result.Failures)
+	require.False(t, result.Stopped)
+
+	for index, item := range items {
+		require.Equal(t, index, result.Succeeded[index])
+
+		var got fileBulkDocument
+		require.NoError(t, str.Retrieve(t.Context(), item.ID, item.ID, &got, nil))
+		require.Equal(t, item.Value, got)
+	}
+}
+
+func TestFileBulkCreateEmptyInput(t *testing.T) {
+	str := newTestStorage(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	result, err := str.BulkCreate(ctx, "unused", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, storage.BulkResult{}, result)
+}
+
+func TestFileBulkCreateSingleItem(t *testing.T) {
+	str := newTestStorage(t)
+	items := fileBulkItems(t.TempDir(), 1)
+
+	result, err := str.BulkCreate(t.Context(), "unused", items, nil)
+	require.NoError(t, err)
+	require.Equal(t, []int{0}, result.Succeeded)
+
+	var got fileBulkDocument
+	require.NoError(t, str.Retrieve(t.Context(), items[0].ID, items[0].ID, &got, nil))
+	require.Equal(t, items[0].Value, got)
+}
+
+func TestFileBulkCreatePartialFailurePreservesOriginalIndices(t *testing.T) {
+	str := newTestStorage(t)
+	items := fileBulkItems(t.TempDir(), 35)
+	rejected := errors.New("rejected by file bulk test")
+	preHook := func(_ context.Context, _ storage.IStorage, id, _ string, _ any, _ *create.Create) error {
+		if id == items[27].ID {
+			return rejected
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(t.Context(), "unused", items, nil, storage.WithPreHook(preHook))
+	require.Error(t, err)
+	require.False(t, result.Stopped)
+	require.Len(t, result.Failures, 1)
+	if failureIndices := []int{result.Failures[0].Index}; !reflect.DeepEqual(failureIndices, []int{27}) {
+		t.Fatalf("failure indices = %v, want [27]", failureIndices)
+	}
+	require.ErrorIs(t, result.Failures[0].Err, rejected)
+
+	for index, item := range items {
+		var got fileBulkDocument
+		retrieveErr := str.Retrieve(t.Context(), item.ID, item.ID, &got, nil)
+		if index == 27 {
+			require.Error(t, retrieveErr)
+
+			continue
+		}
+
+		require.NoError(t, retrieveErr, "item %d", index)
+		require.Equal(t, item.Value, got)
+	}
+}
+
+func TestFileBulkCreateContextCancellationMidBatch(t *testing.T) {
+	str := newTestStorage(t)
+	items := fileBulkItems(t.TempDir(), 40)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	written := 0
+	postHook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+		written++
+		if written == 7 {
+			cancel()
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(ctx, "unused", items, nil, storage.WithPostHook(postHook))
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, result.Stopped)
+	require.Equal(t, []int{0, 1, 2, 3, 4, 5, 6}, result.Succeeded)
+	require.Len(t, result.Failures, len(items)-written)
+
+	for index, item := range items {
+		_, statErr := os.Stat(item.ID)
+		if index < written {
+			require.NoError(t, statErr, "already-written item %d", index)
+		} else {
+			require.ErrorIs(t, statErr, os.ErrNotExist, "unattempted item %d", index)
+		}
+	}
+}
 
 //////
 // Offline (no ENVIRONMENT gating) tests exercising the real file adapter.

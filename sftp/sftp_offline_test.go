@@ -6,10 +6,14 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"expvar"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,6 +49,157 @@ var errHookBoom = errors.New("hook boom")
 type testDoc struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+type sftpBulkDocument struct {
+	Value string `json:"value"`
+}
+
+func sftpBulkItems(dir string, count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for index := range items {
+		items[index] = storage.BulkItem{
+			ID:    filepath.Join(dir, fmt.Sprintf("item-%d.json", index)),
+			Value: sftpBulkDocument{Value: fmt.Sprintf("value-%d", index)},
+		}
+	}
+
+	return items
+}
+
+func preserveSFTPBulkMetrics(t *testing.T, str *SFTP) {
+	t.Helper()
+
+	counters := []*expvar.Int{
+		str.GetCounterCreated(),
+		str.GetCounterCreatedFailed(),
+		str.GetCounterRetrieved(),
+		str.GetCounterRetrievedFailed(),
+	}
+	before := make([]int64, len(counters))
+	for index, counter := range counters {
+		before[index] = counter.Value()
+	}
+
+	t.Cleanup(func() {
+		for index, counter := range counters {
+			counter.Add(before[index] - counter.Value())
+		}
+	})
+}
+
+func TestSFTPBulkCreateHappyPathManyItems(t *testing.T) {
+	str := newOfflineStorage(t)
+	preserveSFTPBulkMetrics(t, str)
+	items := sftpBulkItems(t.TempDir(), 20)
+
+	result, err := str.BulkCreate(t.Context(), "unused", items, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(items), len(result.Succeeded))
+	require.Empty(t, result.Failures)
+	require.False(t, result.Stopped)
+
+	for index, item := range items {
+		require.Equal(t, index, result.Succeeded[index])
+
+		var got sftpBulkDocument
+		require.NoError(t, str.Retrieve(t.Context(), item.ID, item.ID, &got, nil))
+		require.Equal(t, item.Value, got)
+	}
+}
+
+func TestSFTPBulkCreateEmptyInput(t *testing.T) {
+	str := newOfflineStorage(t)
+	preserveSFTPBulkMetrics(t, str)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	result, err := str.BulkCreate(ctx, "unused", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, storage.BulkResult{}, result)
+}
+
+func TestSFTPBulkCreateSingleItem(t *testing.T) {
+	str := newOfflineStorage(t)
+	preserveSFTPBulkMetrics(t, str)
+	items := sftpBulkItems(t.TempDir(), 1)
+
+	result, err := str.BulkCreate(t.Context(), "unused", items, nil)
+	require.NoError(t, err)
+	require.Equal(t, []int{0}, result.Succeeded)
+
+	var got sftpBulkDocument
+	require.NoError(t, str.Retrieve(t.Context(), items[0].ID, items[0].ID, &got, nil))
+	require.Equal(t, items[0].Value, got)
+}
+
+func TestSFTPBulkCreatePartialFailurePreservesOriginalIndices(t *testing.T) {
+	str := newOfflineStorage(t)
+	preserveSFTPBulkMetrics(t, str)
+	items := sftpBulkItems(t.TempDir(), 20)
+	rejected := errors.New("rejected by sftp bulk test")
+	preHook := func(_ context.Context, _ storage.IStorage, id, _ string, _ any, _ *create.Create) error {
+		if id == items[17].ID {
+			return rejected
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(t.Context(), "unused", items, nil, storage.WithPreHook(preHook))
+	require.Error(t, err)
+	require.False(t, result.Stopped)
+	require.Len(t, result.Failures, 1)
+	if failureIndices := []int{result.Failures[0].Index}; !reflect.DeepEqual(failureIndices, []int{17}) {
+		t.Fatalf("failure indices = %v, want [17]", failureIndices)
+	}
+	require.ErrorIs(t, result.Failures[0].Err, rejected)
+
+	for index, item := range items {
+		_, statErr := os.Stat(item.ID)
+		if index == 17 {
+			require.ErrorIs(t, statErr, os.ErrNotExist)
+
+			continue
+		}
+
+		require.NoError(t, statErr, "item %d", index)
+	}
+}
+
+func TestSFTPBulkCreateContextCancellationMidBatch(t *testing.T) {
+	str := newOfflineStorage(t)
+	preserveSFTPBulkMetrics(t, str)
+	items := sftpBulkItems(t.TempDir(), 24)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	var completed atomic.Int32
+	postHook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+		if completed.Add(1) == 3 {
+			cancel()
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(ctx, "unused", items, nil, storage.WithPostHook(postHook))
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, result.Stopped)
+	require.NotEmpty(t, result.Succeeded)
+	require.Equal(t, len(items), len(result.Succeeded)+len(result.Failures))
+
+	succeeded := make(map[int]bool, len(result.Succeeded))
+	for _, index := range result.Succeeded {
+		succeeded[index] = true
+	}
+	for index, item := range items {
+		_, statErr := os.Stat(item.ID)
+		require.Equal(t, statErr == nil, succeeded[index], "persisted/report mismatch for item %d", index)
+	}
+	for _, failure := range result.Failures {
+		require.ErrorIs(t, failure.Err, context.Canceled)
+	}
 }
 
 type testSSHServer struct {

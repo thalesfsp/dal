@@ -1,8 +1,11 @@
 package bolt
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thalesfsp/customerror"
 	"github.com/thalesfsp/dal/v3/internal/shared"
+	"github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/customsort"
@@ -20,6 +24,132 @@ import (
 	"github.com/thalesfsp/params/v2/update"
 	bbolt "go.etcd.io/bbolt"
 )
+
+type boltBulkDocument struct {
+	Value string `json:"value"`
+}
+
+func boltBulkItems(count int) []storage.BulkItem {
+	items := make([]storage.BulkItem, count)
+	for index := range items {
+		items[index] = storage.BulkItem{
+			ID:    fmt.Sprintf("bulk-item-%d", index),
+			Value: boltBulkDocument{Value: fmt.Sprintf("value-%d", index)},
+		}
+	}
+
+	return items
+}
+
+func TestBoltBulkCreateHappyPathManyItems(t *testing.T) {
+	str := newTestStorage(t)
+	items := boltBulkItems(60)
+
+	result, err := str.BulkCreate(t.Context(), "bulk-docs", items, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(items), len(result.Succeeded))
+	require.Empty(t, result.Failures)
+	require.False(t, result.Stopped)
+
+	for index, item := range items {
+		require.Equal(t, index, result.Succeeded[index])
+
+		var got boltBulkDocument
+		require.NoError(t, str.Retrieve(t.Context(), item.ID, "bulk-docs", &got, nil))
+		require.Equal(t, item.Value, got)
+	}
+}
+
+func TestBoltBulkCreateEmptyInput(t *testing.T) {
+	str := newTestStorage(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	result, err := str.BulkCreate(ctx, "bulk-docs", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, storage.BulkResult{}, result)
+}
+
+func TestBoltBulkCreateSingleItem(t *testing.T) {
+	str := newTestStorage(t)
+	items := boltBulkItems(1)
+
+	result, err := str.BulkCreate(t.Context(), "bulk-docs", items, nil)
+	require.NoError(t, err)
+	require.Equal(t, []int{0}, result.Succeeded)
+
+	var got boltBulkDocument
+	require.NoError(t, str.Retrieve(t.Context(), items[0].ID, "bulk-docs", &got, nil))
+	require.Equal(t, items[0].Value, got)
+}
+
+func TestBoltBulkCreatePartialFailureIsNotAtomic(t *testing.T) {
+	str := newTestStorage(t)
+	items := boltBulkItems(35)
+	rejected := errors.New("rejected by bolt bulk test")
+	preHook := func(_ context.Context, _ storage.IStorage, id, _ string, _ any, _ *create.Create) error {
+		if id == items[27].ID {
+			return rejected
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(t.Context(), "bulk-docs", items, nil, storage.WithPreHook(preHook))
+	require.Error(t, err)
+	require.False(t, result.Stopped)
+	require.Len(t, result.Failures, 1)
+	if failureIndices := []int{result.Failures[0].Index}; !reflect.DeepEqual(failureIndices, []int{27}) {
+		t.Fatalf("failure indices = %v, want [27]", failureIndices)
+	}
+	require.ErrorIs(t, result.Failures[0].Err, rejected)
+
+	for index, item := range items {
+		var got boltBulkDocument
+		retrieveErr := str.Retrieve(t.Context(), item.ID, "bulk-docs", &got, nil)
+		if index == 27 {
+			require.Error(t, retrieveErr)
+
+			continue
+		}
+
+		require.NoError(t, retrieveErr, "successful item %d was rolled back", index)
+		require.Equal(t, item.Value, got)
+	}
+}
+
+func TestBoltBulkCreateContextCancellationMidBatch(t *testing.T) {
+	str := newTestStorage(t)
+	items := boltBulkItems(40)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	attempted := 0
+	preHook := func(context.Context, storage.IStorage, string, string, any, *create.Create) error {
+		attempted++
+		if attempted == 7 {
+			cancel()
+		}
+
+		return nil
+	}
+
+	result, err := str.BulkCreate(ctx, "bulk-docs", items, nil, storage.WithPreHook(preHook))
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, result.Stopped)
+	require.Equal(t, []int{0, 1, 2, 3, 4, 5, 6}, result.Succeeded)
+	require.Len(t, result.Failures, len(items)-attempted)
+
+	for index, item := range items {
+		var got boltBulkDocument
+		retrieveErr := str.Retrieve(t.Context(), item.ID, "bulk-docs", &got, nil)
+		if index < attempted {
+			require.NoError(t, retrieveErr, "already-written item %d", index)
+		} else {
+			require.Error(t, retrieveErr, "unattempted item %d", index)
+		}
+	}
+}
 
 //////
 // Offline tests exercising the real bbolt-backed adapter against a

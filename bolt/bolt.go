@@ -643,16 +643,257 @@ func (s *Bolt) List(ctx context.Context, target string, v any, prm *list.List, o
 	return nil
 }
 
-// BulkCreate creates data in bulk.
-func (s *Bolt) BulkCreate(
-	context.Context,
-	string,
-	[]storage.BulkItem,
-	*create.Create,
-	...storage.Func[*create.Create],
+type boltBulkPrepared struct {
+	index   int
+	item    storage.BulkItem
+	target  string
+	value   []byte
+	params  *create.Create
+	options *storage.Options[*create.Create]
+}
+
+type boltBulkOutcome struct {
+	succeeded bool
+	err       error
+}
+
+func (s *Bolt) prepareBulkCreateItem(
+	ctx context.Context,
+	target string,
+	indexed storage.Indexed[storage.BulkItem],
+	prm *create.Create,
+	options ...storage.Func[*create.Create],
+) (boltBulkPrepared, error) {
+	item := indexed.Item
+	if item.ID == "" {
+		return boltBulkPrepared{}, customerror.NewRequiredError("id")
+	}
+
+	o, err := storage.NewOptions[*create.Create]()
+	if err != nil {
+		return boltBulkPrepared{}, err
+	}
+
+	for _, option := range options {
+		if err := option(o); err != nil {
+			return boltBulkPrepared{}, err
+		}
+	}
+
+	finalParam, err := create.New()
+	if err != nil {
+		return boltBulkPrepared{}, err
+	}
+
+	finalParam.TTL = 0
+	finalParam = shared.MergeParams(finalParam, prm)
+
+	trgt, err := shared.TargetName(target, s.Target)
+	if err != nil {
+		return boltBulkPrepared{}, err
+	}
+
+	if o.PreHookFunc != nil {
+		if err := o.PreHookFunc(ctx, s, item.ID, target, item.Value, finalParam); err != nil {
+			return boltBulkPrepared{}, err
+		}
+	}
+
+	value, err := shared.Marshal(item.Value)
+	if err != nil {
+		return boltBulkPrepared{}, err
+	}
+
+	return boltBulkPrepared{
+		index:   indexed.Index,
+		item:    item,
+		target:  trgt,
+		value:   value,
+		params:  finalParam,
+		options: o,
+	}, nil
+}
+
+func (s *Bolt) writeBulkCreateTransaction(prepared []boltBulkPrepared) error {
+	return s.Client.Update(func(tx *bbolt.Tx) error {
+		for _, entry := range prepared {
+			bucket, err := tx.CreateBucketIfNotExists([]byte(entry.target))
+			if err != nil {
+				return err
+			}
+
+			if err := bucket.Put([]byte(entry.item.ID), entry.value); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
+func (s *Bolt) finishBulkCreateItem(ctx context.Context, target string, entry boltBulkPrepared) error {
+	if entry.options.PostHookFunc != nil {
+		if err := entry.options.PostHookFunc(
+			ctx,
+			s,
+			entry.item.ID,
+			target,
+			entry.item.Value,
+			entry.params,
+		); err != nil {
+			return err
+		}
+	}
+
+	s.GetLogger().PrintlnWithOptions(
+		level.Debug,
+		status.Created.String(),
+		sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
+	)
+	s.GetCounterCreated().Add(1)
+
+	return nil
+}
+
+func (s *Bolt) commitBulkCreateChunk(
+	ctx context.Context,
+	target string,
+	prepared []boltBulkPrepared,
+	outcomes []boltBulkOutcome,
+) {
+	if len(prepared) == 0 {
+		return
+	}
+
+	if err := s.writeBulkCreateTransaction(prepared); err != nil {
+		for _, entry := range prepared {
+			outcomes[entry.index].err = customapm.TraceError(
+				ctx,
+				customerror.NewFailedToError(storage.OperationCreate.String(), customerror.WithError(err)),
+				s.GetLogger(),
+				s.GetCounterCreatedFailed(),
+			)
+		}
+
+		return
+	}
+
+	for _, entry := range prepared {
+		if err := s.finishBulkCreateItem(ctx, target, entry); err != nil {
+			outcomes[entry.index].err = customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+
+			continue
+		}
+
+		outcomes[entry.index].succeeded = true
+	}
+}
+
+func markBoltBulkFailures(
+	chunk []storage.Indexed[storage.BulkItem],
+	chunks [][]storage.Indexed[storage.BulkItem],
+	err error,
+	outcomes []boltBulkOutcome,
+) {
+	for _, indexed := range chunk {
+		outcomes[indexed.Index].err = err
+	}
+
+	for _, remainingChunk := range chunks {
+		for _, indexed := range remainingChunk {
+			outcomes[indexed.Index].err = err
+		}
+	}
+}
+
+func assembleBoltBulkResult(
+	items []storage.BulkItem,
+	outcomes []boltBulkOutcome,
+	stopped bool,
 ) (storage.BulkResult, error) {
-	// TODO(v3): real implementation lands in E2.
-	return storage.BulkResult{}, storage.ErrBulkCreateNotImplemented
+	result := storage.BulkResult{
+		Succeeded: make([]int, 0, len(items)),
+		Stopped:   stopped,
+	}
+
+	for index, outcome := range outcomes {
+		if outcome.succeeded {
+			result.Succeeded = append(result.Succeeded, index)
+
+			continue
+		}
+
+		result.Failures = append(result.Failures, storage.BulkItemError{Index: index, Err: outcome.err})
+	}
+
+	return result, result.Err()
+}
+
+// BulkCreate creates data in transactions of at most 25 writes. Each
+// transaction is committed independently, so the overall operation remains
+// deliberately non-atomic while avoiding a transaction per item.
+func (s *Bolt) BulkCreate(
+	ctx context.Context,
+	target string,
+	items []storage.BulkItem,
+	prm *create.Create,
+	options ...storage.Func[*create.Create],
+) (storage.BulkResult, error) {
+	const transactionBatchSize = 25
+
+	if len(items) == 0 {
+		return storage.BulkResult{}, nil
+	}
+
+	chunks, err := storage.ChunkIndexed(items, transactionBatchSize)
+	if err != nil {
+		return storage.BulkResult{}, err
+	}
+
+	outcomes := make([]boltBulkOutcome, len(items))
+	stopped := false
+
+	for chunkIndex, chunk := range chunks {
+		prepared := make([]boltBulkPrepared, 0, len(chunk))
+		stoppedAt := len(chunk)
+		var stopErr error
+
+		for itemIndex, indexed := range chunk {
+			if err := ctx.Err(); err != nil {
+				stopped = true
+				stoppedAt = itemIndex
+				stopErr = err
+
+				break
+			}
+
+			entry, err := s.prepareBulkCreateItem(ctx, target, indexed, prm, options...)
+			if err != nil {
+				outcomes[indexed.Index].err = customapm.TraceError(ctx, err, s.GetLogger(), s.GetCounterCreatedFailed())
+
+				continue
+			}
+
+			prepared = append(prepared, entry)
+		}
+
+		s.commitBulkCreateChunk(ctx, target, prepared, outcomes)
+
+		if stopErr == nil {
+			stopErr = ctx.Err()
+			if stopErr != nil && chunkIndex+1 < len(chunks) {
+				stopped = true
+			}
+		}
+
+		if stopped {
+			markBoltBulkFailures(chunk[stoppedAt:], chunks[chunkIndex+1:], stopErr, outcomes)
+
+			break
+		}
+	}
+
+	return assembleBoltBulkResult(items, outcomes, stopped)
 }
 
 // Create data.
