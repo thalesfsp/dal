@@ -10,6 +10,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Add `BulkUpdate`; `BulkCreate` ships in v3.0.0.
 
 ## [Unreleased]
+### Changed
+- **Elastic APM is now opt-in.** Until now every adapter imported
+  `go.elastic.co/apm`, whose `init` builds `apm.DefaultTracer` from the
+  `ELASTIC_APM_*` variables, starts its background goroutines and, one second
+  later, starts polling the APM server (`http://localhost:8200` when unset) for
+  config — in any program that imported `dal/v3/storage`, wanted or not — and
+  every operation traced to it. The core packages now link no Elastic code and
+  start nothing at init; by default, dal emits no APM spans, transactions or
+  errors. No exported identifier changed, so every consumer compiles unchanged.
+  **To keep dal's spans in Elastic APM, call `elasticapm.Enable()` once at
+  start-up** (`import "github.com/thalesfsp/dal/v3/elasticapm"`).
+
+### Added
+- `tracing`: the dependency-free hook dal calls around every operation
+  (`Tracer` with `Start`, `RecordError`, `LogFields`; `Set`, `Get`, `Noop`).
+  The default is a no-op.
+- `elasticapm`: the previous Elastic APM behaviour as a `tracing.Tracer`
+  (`New`, `Enable`): spans named `<adapter>.<operation>`, the implicit
+  transaction when the context carries none, error capture with span outcome
+  `failure`, and the `trace.id` / `transaction.id` / `span.id` log fields.
+- `internal/coreguard`: tests that fail if a core package links Elastic code
+  again, or if anything Elastic runs at init.
+
 ### Fixed
 - Every adapter's `New` handed its whole storage struct to the validator,
   which descends into nested structs by default — so construction walked the

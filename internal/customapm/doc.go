@@ -1,2 +1,3 @@
-// Package customapm provides types and methods to deal APM.
+// Package customapm routes dal's operation spans and errors to the installed
+// tracing.Tracer. It imports no tracing backend.
 package customapm

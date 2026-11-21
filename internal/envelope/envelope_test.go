@@ -8,11 +8,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thalesfsp/dal/v3/elasticapm"
 	"github.com/thalesfsp/dal/v3/internal/logging"
 	"github.com/thalesfsp/dal/v3/storage"
+	"github.com/thalesfsp/dal/v3/tracing"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/sypl/v2"
-	"go.elastic.co/apm"
 	"go.elastic.co/apm/apmtest"
 )
 
@@ -55,11 +56,10 @@ func recordingTracer(t *testing.T) *apmtest.RecordingTracer {
 	t.Helper()
 
 	tracer := apmtest.NewRecordingTracer()
-	previous := apm.DefaultTracer
-	apm.DefaultTracer = tracer.Tracer
+	previous := tracing.Set(elasticapm.New(tracer.Tracer))
 
 	t.Cleanup(func() {
-		apm.DefaultTracer = previous
+		tracing.Set(previous)
 		tracer.Close()
 	})
 

@@ -6,38 +6,19 @@ import (
 	"expvar"
 
 	"github.com/thalesfsp/dal/v3/internal/logging"
+	"github.com/thalesfsp/dal/v3/tracing"
 	"github.com/thalesfsp/sypl/v2"
 	"github.com/thalesfsp/sypl/v2/fields"
 	"github.com/thalesfsp/sypl/v2/level"
-	"go.elastic.co/apm"
 )
-
-//////
-// Vars, consts, and types.
-//////
-
-// Outcome is the outcome of a span. It can be either success or failure.
-type Outcome string
-
-const (
-	// Failure is the outcome when the span failed.
-	Failure Outcome = "failure"
-
-	// Success is the outcome when the span succeeded.
-	Success Outcome = "success"
-)
-
-func (o Outcome) String() string {
-	return string(o)
-}
 
 //////
 // Exported functionalities.
 //////
 
-// TraceError is a helper function to trace an error. It will log the error
-// with the APM fields, and tell APM that it was an error. It will also set
-// the span outcome to failure.
+// TraceError is a helper function to trace an error. It increments metric,
+// reports the error to the installed tracing.Tracer, and logs it with the
+// tracer's correlation fields. It returns err unchanged.
 func TraceError(
 	ctx context.Context,
 	err error,
@@ -57,46 +38,29 @@ func TraceError(
 	}
 
 	//////
-	// APM.
+	// Tracing.
 	//////
 
-	// Get the current span from the context, if any, set the outcome.
-	span := apm.SpanFromContext(ctx)
-	if span != nil {
-		span.Outcome = string(Failure)
-	}
-
-	originalError := err
-
-	// Unwrap any nested errorcatalog. By default, apm.CaptureError() does not
-	// automatically unwrap nested errors or extract any additional context or
-	// metadata from the error.
-	for {
-		unwrapped := errors.Unwrap(err)
-		if unwrapped == nil {
-			break
-		}
-
-		err = unwrapped
-	}
-
-	// Tells APM that it that was an error.
-	if apmErr := apm.CaptureError(ctx, err); apmErr != nil {
-		apmErr.Send()
-	}
+	tracing.Get().RecordError(ctx, err)
 
 	//////
 	// Logging
 	//////
 
-	// Correlates the transaction, span and log, and logs it.
+	// Correlates the trace and log, and logs the innermost error's message,
+	// as it always has.
 	if l != nil {
+		innermost := err
+		for unwrapped := errors.Unwrap(innermost); unwrapped != nil; unwrapped = errors.Unwrap(innermost) {
+			innermost = unwrapped
+		}
+
 		l.PrintlnWithOptions(
 			level.Error,
-			err.Error(),
+			innermost.Error(),
 			sypl.WithFields(logging.ToAPM(ctx, make(fields.Fields))),
 		)
 	}
 
-	return originalError
+	return err
 }
