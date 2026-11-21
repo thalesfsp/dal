@@ -1,6 +1,6 @@
 # dal
 
-`dal` defines a common Go storage interface for CRUD, list, count, and bulk-create operations. Twelve adapters implement that interface for embedded, filesystem, database, cache, search, and cloud backends; callers can use a concrete adapter or program against `storage.IStorage`. The package also provides concurrent single- and multi-storage helpers, operation hooks, counters, logging, and Elastic APM instrumentation.
+`dal` defines a common Go storage interface for CRUD, list, count, and bulk-create operations. Twelve adapters implement that interface for embedded, filesystem, database, cache, search, and cloud backends; callers can use a concrete adapter or program against `storage.IStorage`. The package also provides concurrent single- and multi-storage helpers, operation hooks, counters, logging, and a tracing hook. Elastic APM instrumentation is opt-in (see [Tracing](#tracing)); the core packages link no Elastic code.
 
 ## Install
 
@@ -122,6 +122,23 @@ Its contract is explicit:
 - Empty input succeeds with an empty result, even with an already-cancelled context. IDs must be non-empty. For duplicate IDs, the value that remains is unspecified.
 
 Inspect the result before retrying so already-successful writes are not repeated.
+
+## Tracing
+
+Every operation runs inside a span started on the installed `tracing.Tracer`, and every failure is reported to it. **By default that tracer does nothing**: `storage`, `tracing` and every adapter except `elasticsearch` import no Elastic code; the `elasticsearch` adapter imports its Elasticsearch client but not APM; and nothing is started at init. `internal/coreguard` fails the build if that regresses.
+
+To send dal's spans, errors and log-correlation fields (`trace.id`, `transaction.id`, `span.id`) to Elastic APM, enable it once at start-up, before the first operation:
+
+```go
+import "github.com/thalesfsp/dal/v3/elasticapm"
+
+elasticapm.Enable() // uses apm.DefaultTracer, configured by the ELASTIC_APM_* variables
+
+// or, with a tracer of your own:
+tracing.Set(elasticapm.New(myTracer))
+```
+
+Only a program that imports `elasticapm` links `go.elastic.co/apm` and pays its init cost (`apm.DefaultTracer`, its background goroutines, and polling the APM server for config). Any other backend implements the three-method `tracing.Tracer` interface and calls `tracing.Set`.
 
 ## Contributing
 
