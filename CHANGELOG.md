@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ ] Add `BulkUpdate`; `BulkCreate` ships in v3.0.0.
 
 ## [Unreleased]
+
+## [3.1.0] - 2026-11-20
 ### Changed
 - **Elastic APM is now opt-in.** Until now every adapter imported
   `go.elastic.co/apm`, whose `init` builds `apm.DefaultTracer` from the
