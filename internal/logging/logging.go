@@ -2,15 +2,16 @@ package logging
 
 import (
 	"context"
+	"maps"
 	"sync"
 
+	"github.com/thalesfsp/dal/v3/tracing"
 	"github.com/thalesfsp/sypl/v2"
 	"github.com/thalesfsp/sypl/v2/fields"
 	"github.com/thalesfsp/sypl/v2/formatter"
 	"github.com/thalesfsp/sypl/v2/level"
 	"github.com/thalesfsp/sypl/v2/output"
 	"github.com/thalesfsp/sypl/v2/processor"
-	"go.elastic.co/apm"
 )
 
 //////
@@ -67,25 +68,14 @@ func Get() *Logger {
 	return singletonLogger
 }
 
-// ToAPM adds the required APM fields enabling log correlation.
-//
-// NOTE: It expects the `apm.Transaction` to be in the context.
+// ToAPM adds the installed tracing.Tracer's log-correlation fields (e.g.
+// `trace.id`) to f. With the default no-op tracer it adds nothing.
 func ToAPM(ctx context.Context, f fields.Fields) fields.Fields {
 	if f == nil {
 		f = fields.Fields{}
 	}
 
-	tx := apm.TransactionFromContext(ctx)
-	if tx != nil {
-		traceContext := tx.TraceContext()
-
-		f["trace.id"] = traceContext.Trace.String()
-		f["transaction.id"] = traceContext.Span.String()
-
-		if span := apm.SpanFromContext(ctx); span != nil {
-			f["span.id"] = span.TraceContext().Span.String()
-		}
-	}
+	maps.Copy(f, tracing.Get().LogFields(ctx))
 
 	return f
 }

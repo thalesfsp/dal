@@ -1,14 +1,24 @@
 package logging
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thalesfsp/dal/v3/tracing"
 	"github.com/thalesfsp/sypl/v2/fields"
-	"go.elastic.co/apm"
-	"go.elastic.co/apm/apmtest"
 )
+
+type fieldsTracer struct{ fields map[string]any }
+
+func (fieldsTracer) Start(ctx context.Context, _, _, _ string) (context.Context, tracing.Span) {
+	return tracing.Noop().Start(ctx, "", "", "")
+}
+
+func (fieldsTracer) RecordError(context.Context, error) {}
+
+func (f fieldsTracer) LogFields(context.Context) map[string]any { return f.fields }
 
 func TestGet_Singleton(t *testing.T) {
 	l1 := Get()
@@ -18,8 +28,8 @@ func TestGet_Singleton(t *testing.T) {
 	assert.Same(t, l1, l2, "Get must always return the same logger instance")
 }
 
-func TestToAPM_NoTransaction(t *testing.T) {
-	// Nil fields + no transaction in context: returns an initialized, empty
+func TestToAPM_NoTracer(t *testing.T) {
+	// Nil fields + the default no-op tracer: returns an initialized, empty
 	// fields map.
 	f := ToAPM(t.Context(), nil)
 
@@ -27,22 +37,14 @@ func TestToAPM_NoTransaction(t *testing.T) {
 	assert.Empty(t, f)
 }
 
-func TestToAPM_WithTransactionAndSpan(t *testing.T) {
-	tracer := apmtest.NewRecordingTracer()
-	defer tracer.Close()
+func TestToAPM_MergesTracerFields(t *testing.T) {
+	previous := tracing.Set(fieldsTracer{fields: map[string]any{
+		"trace.id": "t-1",
+		"span.id":  "s-1",
+	}})
+	t.Cleanup(func() { tracing.Set(previous) })
 
-	tx := tracer.StartTransaction("tx", "test")
-	defer tx.End()
+	f := ToAPM(t.Context(), fields.Fields{"pre": "kept"})
 
-	ctx := apm.ContextWithTransaction(t.Context(), tx)
-
-	span, ctx := apm.StartSpan(ctx, "span", "test")
-	defer span.End()
-
-	f := ToAPM(ctx, fields.Fields{"pre": "kept"})
-
-	assert.Equal(t, "kept", f["pre"])
-	assert.NotEmpty(t, f["trace.id"])
-	assert.NotEmpty(t, f["transaction.id"])
-	assert.NotEmpty(t, f["span.id"])
+	assert.Equal(t, fields.Fields{"pre": "kept", "trace.id": "t-1", "span.id": "s-1"}, f)
 }

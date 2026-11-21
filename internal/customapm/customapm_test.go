@@ -1,89 +1,123 @@
 package customapm
 
 import (
+	"context"
 	"expvar"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thalesfsp/customerror"
-	"go.elastic.co/apm"
-	"go.elastic.co/apm/apmtest"
+	"github.com/thalesfsp/dal/v3/tracing"
+	"github.com/thalesfsp/sypl/v2"
+	"github.com/thalesfsp/sypl/v2/level"
+	"github.com/thalesfsp/sypl/v2/output"
 )
 
-// Trace without an inbound transaction starts one implicitly; Span.End must
-// end BOTH the span and that transaction so it is reported instead of leaked.
-func TestTrace_ImplicitTransactionIsEnded(t *testing.T) {
-	tracer := apmtest.NewRecordingTracer()
-	defer tracer.Close()
+type ctxKey struct{}
 
-	prev := apm.DefaultTracer
-	apm.DefaultTracer = tracer.Tracer
+type fakeSpan struct{ ended *int }
 
-	defer func() { apm.DefaultTracer = prev }()
+func (s fakeSpan) End() { *s.ended++ }
+
+type fakeTracer struct {
+	started []string
+	ended   int
+	errs    []error
+}
+
+func (f *fakeTracer) Start(ctx context.Context, what, nameOf, operation string) (context.Context, tracing.Span) {
+	f.started = append(f.started, what+"."+nameOf+"."+operation)
+
+	return context.WithValue(ctx, ctxKey{}, "traced"), fakeSpan{ended: &f.ended}
+}
+
+func (f *fakeTracer) RecordError(_ context.Context, err error) { f.errs = append(f.errs, err) }
+
+func (f *fakeTracer) LogFields(ctx context.Context) map[string]any {
+	if ctx.Value(ctxKey{}) == nil {
+		return nil
+	}
+
+	return map[string]any{"trace.id": "t-1"}
+}
+
+func install(t *testing.T) *fakeTracer {
+	t.Helper()
+
+	fake := &fakeTracer{}
+	previous := tracing.Set(fake)
+
+	t.Cleanup(func() { tracing.Set(previous) })
+
+	return fake
+}
+
+func recorder() (*output.RecorderOutput, sypl.ISypl) {
+	rec, out := output.Recorder(level.Error)
+
+	return rec, sypl.New("test", out)
+}
+
+// With no tracer installed, Trace hands back the same context and a usable span.
+func TestTrace_DefaultIsNoop(t *testing.T) {
+	ctx := t.Context()
+
+	got, span := Trace(ctx, "storage", "memory", "created")
+	require.NotNil(t, span)
+	assert.Equal(t, ctx, got)
+	assert.NotPanics(t, span.End)
+}
+
+// Trace delegates to the installed tracer, with the operation's names.
+func TestTrace_UsesInstalledTracer(t *testing.T) {
+	fake := install(t)
 
 	ctx, span := Trace(t.Context(), "storage", "memory", "created")
-	require.NotNil(t, span)
-	require.NotNil(t, ctx)
-
 	span.End()
 
-	tracer.Flush(nil)
-
-	payloads := tracer.Payloads()
-	assert.Len(t, payloads.Transactions, 1,
-		"the implicitly-created transaction must be ended and reported")
-	assert.Len(t, payloads.Spans, 1)
+	assert.Equal(t, []string{"storage.memory.created"}, fake.started)
+	assert.Equal(t, 1, fake.ended)
+	assert.Equal(t, "traced", ctx.Value(ctxKey{}))
 }
 
-// Trace with an inbound transaction must reuse it and must NOT end it — the
-// caller owns its lifecycle.
-func TestTrace_ExistingTransactionNotEnded(t *testing.T) {
-	tracer := apmtest.NewRecordingTracer()
-	defer tracer.Close()
-
-	tx := tracer.StartTransaction("parent", "request")
-	ctx := apm.ContextWithTransaction(t.Context(), tx)
-
-	ctx, span := Trace(ctx, "storage", "memory", "created")
-	require.NotNil(t, span)
-	require.NotNil(t, ctx)
-
-	span.End()
-
-	tracer.Flush(nil)
-
-	payloads := tracer.Payloads()
-	assert.Empty(t, payloads.Transactions,
-		"the caller-owned transaction must not be ended by Span.End")
-	assert.Len(t, payloads.Spans, 1)
-
-	tx.End()
-}
-
-// End on a nil Span or a zero Span must be a no-op, never a panic.
-func TestSpan_EndNilSafe(t *testing.T) {
-	var s *Span
-
-	assert.NotPanics(t, func() { s.End() })
-	assert.NotPanics(t, func() { (&Span{}).End() })
-}
-
-// TraceError(nil) is a no-op returning nil — it must not touch the metric.
+// TraceError(nil) is a no-op returning nil: no metric, no report.
 func TestTraceError_NilError(t *testing.T) {
+	fake := install(t)
 	metric := &expvar.Int{}
 
-	err := TraceError(t.Context(), nil, nil, metric)
-	assert.NoError(t, err)
+	require.NoError(t, TraceError(t.Context(), nil, nil, metric))
 	assert.Equal(t, int64(0), metric.Value())
+	assert.Empty(t, fake.errs)
 }
 
-// TraceError returns the ORIGINAL (wrapped) error and increments the metric.
-func TestTraceError_ReturnsOriginalAndCounts(t *testing.T) {
+// TraceError returns the ORIGINAL error, counts it, reports it to the tracer,
+// and logs the innermost message with the tracer's correlation fields.
+func TestTraceError_ReportsCountsAndLogs(t *testing.T) {
+	fake := install(t)
 	metric := &expvar.Int{}
 	original := customerror.NewFailedToError("op", customerror.WithError(assert.AnError))
+	rec, logger := recorder()
 
-	got := TraceError(t.Context(), original, nil, metric)
+	ctx, span := Trace(t.Context(), "storage", "memory", "created")
+	defer span.End()
+
+	got := TraceError(ctx, original, logger, metric)
+
 	assert.Same(t, original, got)
 	assert.Equal(t, int64(1), metric.Value())
+	require.Len(t, fake.errs, 1)
+	assert.Same(t, original, fake.errs[0], "the tracer receives the original error")
+
+	msgs := rec.Messages()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, assert.AnError.Error(), strings.TrimSpace(msgs[0].OriginalContent), "the innermost message is logged")
+	assert.Equal(t, "t-1", msgs[0].Fields["trace.id"])
+}
+
+// Nil metric and nil logger: still returns the original error, no panic.
+func TestTraceError_NilMetricAndLogger(t *testing.T) {
+	err := TraceError(t.Context(), assert.AnError, nil, nil)
+	assert.ErrorIs(t, err, assert.AnError)
 }

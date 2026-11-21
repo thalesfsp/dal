@@ -10,14 +10,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thalesfsp/customerror"
+	"github.com/thalesfsp/dal/v3/elasticapm"
 	"github.com/thalesfsp/dal/v3/storage"
+	"github.com/thalesfsp/dal/v3/tracing"
 	"github.com/thalesfsp/params/v2/count"
 	"github.com/thalesfsp/params/v2/create"
 	"github.com/thalesfsp/params/v2/delete"
 	"github.com/thalesfsp/params/v2/list"
 	"github.com/thalesfsp/params/v2/retrieve"
 	"github.com/thalesfsp/params/v2/update"
-	"go.elastic.co/apm"
 	"go.elastic.co/apm/apmtest"
 	"go.elastic.co/apm/transport/transporttest"
 )
@@ -45,12 +46,11 @@ func dynamoEnvelopeHooks[T any](preErr error, events *[]string) []storage.Func[T
 func recordDynamoEnvelope(t *testing.T, fn func() (any, error)) (any, transporttest.Payloads, error) {
 	t.Helper()
 	tracer := apmtest.NewRecordingTracer()
-	previous := apm.DefaultTracer
-	apm.DefaultTracer = tracer.Tracer
+	previous := tracing.Set(elasticapm.New(tracer.Tracer))
 	got, err := fn()
 	tracer.Flush(nil)
 	payloads := tracer.Payloads()
-	apm.DefaultTracer = previous
+	tracing.Set(previous)
 	tracer.Close()
 	return got, payloads, err
 }
