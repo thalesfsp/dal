@@ -8,21 +8,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	// Every core package, linked into this test binary so the init test sees
-	// whatever their imports start.
-	_ "github.com/thalesfsp/dal/v3/bolt"
-	_ "github.com/thalesfsp/dal/v3/dynamodb"
-	_ "github.com/thalesfsp/dal/v3/elasticsearch"
-	_ "github.com/thalesfsp/dal/v3/file"
-	_ "github.com/thalesfsp/dal/v3/memory"
-	_ "github.com/thalesfsp/dal/v3/mongodb"
-	_ "github.com/thalesfsp/dal/v3/mysql"
-	_ "github.com/thalesfsp/dal/v3/postgres"
-	_ "github.com/thalesfsp/dal/v3/redis"
-	_ "github.com/thalesfsp/dal/v3/s3"
-	_ "github.com/thalesfsp/dal/v3/sftp"
-	_ "github.com/thalesfsp/dal/v3/sqlite"
-	_ "github.com/thalesfsp/dal/v3/storage"
 	"github.com/thalesfsp/dal/v3/tracing"
 )
 
@@ -38,7 +23,8 @@ var corePackages = []string{
 func deps(t *testing.T, pkgs ...string) []string {
 	t.Helper()
 
-	args := []string{"list", "-deps"}
+	args := make([]string, 0, 2+len(pkgs))
+	args = append(args, "list", "-deps")
 	for _, p := range pkgs {
 		args = append(args, module+p)
 	}
